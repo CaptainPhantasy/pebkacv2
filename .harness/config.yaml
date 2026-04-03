@@ -1,0 +1,9 @@
+# PEBKAC Harness Configuration
+version: "1.0"
+
+defaults:
+  evidence_required: true
+  deterministic_prompting: true
+  secrets_isolation: true
+  git_guard: true
+  checkpoint_interval: 10

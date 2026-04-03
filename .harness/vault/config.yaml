@@ -1,0 +1,14 @@
+# PEBKAC Vault Configuration
+# Real credentials live here — the model never sees this file.
+# The harness generates scoped proxy credentials instead.
+#
+# Add your secrets below:
+# secrets:
+#   aws_production:
+#     real_key: "AKIAIOSFODNN7EXAMPLE"
+#     proxy_generator: "aws_sts_session"
+#     scope:
+#       - "s3:ReadOnly"
+#     expiry: "1h"
+
+secrets: {}
