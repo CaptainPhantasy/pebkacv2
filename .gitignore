@@ -1,0 +1,9 @@
+.DS_Store
+.harness/.DS_Store
+.harness/audit.log
+.harness/checkpoints/
+.harness/automation/
+.harness/logs/
+.harness/state/
+.harness/projects/
+.harness/proxies/
