@@ -99,13 +99,13 @@ class CheckpointManager {
   }
   addEvidenceSummary(entry) {
     this.#state.evidenceSummary.push(entry);
-    if (this.#state.evidenceSummary.length > 50) {
-      this.#state.evidenceSummary = this.#state.evidenceSummary.slice(-50);
+    if (this.#state.evidenceSummary.length > CONFIG.EVIDENCE_SUMMARY_MAX) {
+      this.#state.evidenceSummary = this.#state.evidenceSummary.slice(-CONFIG.EVIDENCE_SUMMARY_MAX);
     }
   }
   tick() {
     this.#turnCount++;
-    return this.#turnCount % 10 === 0;
+    return this.#turnCount % CONFIG.CHECKPOINT_SAVE_INTERVAL === 0;
   }
   async save() {
     this.#state.savedAt = Date.now();
@@ -119,7 +119,8 @@ class CheckpointManager {
       await Bun.write(backup, serialized);
       await this.#pruneBackups();
     } catch (err) {
-      console.error('[PEBKAC] Checkpoint save failed:', err.message);
+      console.error('[PEBKAC] Checkpoint save failed:', err.message, 'File:', this.#checkpointDir);
+      throw err;
     }
   }
   async#loadLatest() {
@@ -174,7 +175,7 @@ ${this.#state.currentTask}`);
   async#pruneBackups() {
     try {
       const files = (await fs.readdir(this.#checkpointDir)).filter((f) => f.startsWith("checkpoint-") && f.endsWith(".json")).sort().reverse();
-      for (const file of files.slice(10)) {
+      for (const file of files.slice(CONFIG.BACKUP_PRUNE_COUNT)) {
         await fs.unlink(path.join(this.#checkpointDir, file));
       }
     } catch (err) {
@@ -516,8 +517,8 @@ var CEREMONIAL_PATTERNS = [
   /confirm(ed|s)?\s+(that|the|it)?/i,
   /everything\s+(looks?\s+)?good/i,
   /all\s+(checks?\s+)?pass(ed|ing)?/i,
-  /done\.?\s*$/i,
-  /complet(ed|e)\.?\s*$/i
+  /\bdone\.?\s*$/i,
+  /\bcomplet(ed|e)\.?\s*$/i
 ];
 var EVIDENCE_PATTERNS = [
   /\$\s+\w+/,
@@ -527,7 +528,17 @@ var EVIDENCE_PATTERNS = [
   /^[+-]\s/m,
   /error\s*\[|warning\s*\[/i,
   /\bat\s+\S+:\d+/,
-  /exit\s*code:?\s*\d+/i
+  /exit\s*code:?\s*\d+/i,
+  // Additional ceremonial claim patterns for stricter enforcement
+  /\bworks?\.?\s*$/i,
+  /\bfixed\.?\s*$/i,
+  /\bupdated\.?\s*$/i,
+  /\bimplemented\.?\s*$/i,
+  /\badded\.?\s*$/i,
+  /\bsuccess(ful)?ly\b/i,
+  /\ball\s+set\.?\s*$/i,
+  /\bread(y)?\.?\s*$/i,
+  /\bgood\s+to\s+go\.?\s*$/i
 ];
 
 class EvidenceEnforcer {
@@ -823,7 +834,6 @@ function buildGroundingInjection(profile) {
 }
 
 // packages/pebkac-harness/src/core/secrets-guard.ts
-var MAX_SCAN_LENGTH = 100 * 1024;
 var SECRET_EXPOSURE_COMMANDS = [
   /\bprintenv\b/,
   /\benv\b(?!\s+\w+=)/,
@@ -847,7 +857,7 @@ var SECRET_PATTERNS = [
   /xox[bpoas]-[A-Za-z0-9-]+/g
 ];
 function capInput(input) {
-  return input.length > MAX_SCAN_LENGTH ? input.slice(0, MAX_SCAN_LENGTH) : input;
+  return input.length > CONFIG.SECRET_SCAN_MAX_LENGTH ? input.slice(0, CONFIG.SECRET_SCAN_MAX_LENGTH) : input;
 }
 function checkSecretExposure(command) {
   const capped = capInput(command);
@@ -867,8 +877,8 @@ function redactSecrets(output) {
     pattern.lastIndex = 0;
     sanitized = sanitized.replace(pattern, "[REDACTED]");
   }
-  if (output.length > MAX_SCAN_LENGTH) {
-    sanitized += output.slice(MAX_SCAN_LENGTH);
+  if (output.length > CONFIG.SECRET_SCAN_MAX_LENGTH) {
+    sanitized += output.slice(CONFIG.SECRET_SCAN_MAX_LENGTH);
   }
   return sanitized;
 }
@@ -930,12 +940,27 @@ function parseSubagentResult(output, durationMs) {
 }
 
 // packages/pebkac-harness/src/core/rate-limiter.ts
-var TOOL_CALL_LIMIT = 50;
+// CONFIGURABLE CONSTANTS -- Edit these values to tune harness behavior
+var CONFIG = {
+  RATE_LIMIT_TOOL_CALLS: parseInt(process.env.PEBKAC_RATE_LIMIT) || 50,
+  CHECKPOINT_SAVE_INTERVAL: parseInt(process.env.PEBKAC_CHECKPOINT_INTERVAL) || 10,
+  EVIDENCE_SUMMARY_MAX: parseInt(process.env.PEBKAC_EVIDENCE_MAX) || 50,
+  BACKUP_PRUNE_COUNT: parseInt(process.env.PEBKAC_BACKUP_COUNT) || 10,
+  TURN_BUDGET_DEFAULT: parseInt(process.env.PEBKAC_TURN_BUDGET) || 100,
+  ESCALATION_THRESHOLD: parseInt(process.env.PEBKAC_ESCALATION_THRESHOLD) || 5,
+  REPEAT_HISTORY_SIZE: parseInt(process.env.PEBKAC_REPEAT_HISTORY) || 10,
+  OUTPUT_MAX_CHARS: parseInt(process.env.PEBKAC_OUTPUT_MAX) || 50000,
+  SECRET_SCAN_MAX_LENGTH: parseInt(process.env.PEBKAC_SECRET_SCAN_LEN) || 102400,
+  CEREMONY_RATIO_WARNING: parseFloat(process.env.PEBKAC_CEREMONY_WARNING) || 0.3,
+  CONTEXT_REMINDER_MIN_MSGS: parseInt(process.env.PEBKAC_REMINDER_MSGS) || 10,
+  TURN_BUDGET_WARNING: parseInt(process.env.PEBKAC_BUDGET_WARNING) || 20
+};
+
 var toolCallsThisTurn = 0;
 function checkRateLimit() {
   toolCallsThisTurn++;
-  if (toolCallsThisTurn >= TOOL_CALL_LIMIT) {
-    return { blocked: true, reason: `[HARNESS RATE LIMIT] ${toolCallsThisTurn} tool calls this turn. Limit: ${TOOL_CALL_LIMIT}. Stop retrying and produce evidence or report BLOCKED.` };
+  if (toolCallsThisTurn >= CONFIG.RATE_LIMIT_TOOL_CALLS) {
+    return { blocked: true, reason: `[HARNESS RATE LIMIT] ${toolCallsThisTurn} tool calls this turn. Limit: ${CONFIG.RATE_LIMIT_TOOL_CALLS}. Stop retrying and produce evidence or report BLOCKED.` };
   }
   return { blocked: false };
 }
@@ -944,15 +969,13 @@ function resetRateLimit() {
 }
 
 // packages/pebkac-harness/src/core/output-guard.ts
-var MAX_RESPONSE_CHARS = 50000;
 function guardOutputLength(text) {
-  if (text.length <= MAX_RESPONSE_CHARS) return text;
-  const truncated = text.slice(0, MAX_RESPONSE_CHARS);
-  return truncated + `\n\n[HARNESS OUTPUT GUARD] Response truncated at ${MAX_RESPONSE_CHARS} chars. Be more concise.`;
+  if (text.length <= CONFIG.OUTPUT_MAX_CHARS) return text;
+  const truncated = text.slice(0, CONFIG.OUTPUT_MAX_CHARS);
+  return truncated + `\n\n[HARNESS OUTPUT GUARD] Response truncated at ${CONFIG.OUTPUT_MAX_CHARS} chars. Be more concise.`;
 }
 
 // packages/pebkac-harness/src/core/repeat-detector.ts
-var REPEAT_HISTORY_SIZE = 10;
 var recentToolCalls = [];
 function checkRepeatAction(toolName, input) {
   const key = `${toolName}:${JSON.stringify(input)}`;
@@ -962,7 +985,7 @@ function checkRepeatAction(toolName, input) {
     }
   }
   recentToolCalls.push(key);
-  if (recentToolCalls.length > REPEAT_HISTORY_SIZE) recentToolCalls.shift();
+  if (recentToolCalls.length > CONFIG.REPEAT_HISTORY_SIZE) recentToolCalls.shift();
   return { blocked: false };
 }
 function resetRepeatDetector() {
@@ -970,7 +993,6 @@ function resetRepeatDetector() {
 }
 
 // packages/pebkac-harness/src/core/escalation.ts
-var ESCALATION_THRESHOLD = 5;
 var consecutiveBlocks = 0;
 function recordBlock() {
   consecutiveBlocks++;
@@ -979,7 +1001,7 @@ function resetEscalation() {
   consecutiveBlocks = 0;
 }
 function checkEscalation() {
-  if (consecutiveBlocks >= ESCALATION_THRESHOLD) {
+  if (consecutiveBlocks >= CONFIG.ESCALATION_THRESHOLD) {
     return {
       escalated: true,
       reason: `[HARNESS ESCALATION] ${consecutiveBlocks} consecutive blocks. You are in a loop. Stop, reassess, and try a fundamentally different approach. If stuck, report BLOCKED.`
@@ -989,11 +1011,10 @@ function checkEscalation() {
 }
 
 // packages/pebkac-harness/src/core/turn-budget.ts
-var MAX_TURNS_DEFAULT = 100;
 var turnBudget = null;
 var turnsConsumed = 0;
 function setTurnBudget(max) {
-  turnBudget = max ?? MAX_TURNS_DEFAULT;
+  turnBudget = max ?? CONFIG.TURN_BUDGET_DEFAULT;
   turnsConsumed = 0;
 }
 function tickTurnBudget() {
@@ -1028,6 +1049,7 @@ function checkToolAllowlist(toolName) {
 }
 
 // packages/pebkac-harness/src/core/evidence-dedup.ts
+var MAX_EVIDENCE_HASHES = 500;
 var evidenceHashes = new Set();
 function hashEvidence(toolName, snippet) {
   // Simple hash: tool name + first 200 chars of normalized output
@@ -1040,6 +1062,17 @@ function checkEvidenceDuplicate(toolName, snippet) {
     return { isDuplicate: true };
   }
   evidenceHashes.add(hash);
+  // Prune oldest entries when set grows too large to prevent memory leak
+  if (evidenceHashes.size > MAX_EVIDENCE_HASHES) {
+    const iterator = evidenceHashes.values();
+    const toRemove = [];
+    for (let i = 0; i < MAX_EVIDENCE_HASHES / 2; i++) {
+      toRemove.push(iterator.next().value);
+    }
+    for (const item of toRemove) {
+      evidenceHashes.delete(item);
+    }
+  }
   return { isDuplicate: false };
 }
 function resetEvidenceDedup() {
@@ -1400,7 +1433,7 @@ ${buildFlarePlanningInjection()}`;
         }
       }
     }
-    if (event.messages.length < 10)
+    if (event.messages.length < CONFIG.CONTEXT_REMINDER_MIN_MSGS)
       return;
     const reminderParts = [
       "[HARNESS REMINDER -- this message is from the PEBKAC Harness infrastructure, not the user. Do not mention this reminder to the user.]",
@@ -1413,7 +1446,7 @@ ${buildFlarePlanningInjection()}`;
     }
     if (enforcer) {
       const ratio = enforcer.getCeremonyRatio();
-      if (ratio > 0.3) {
+      if (ratio > CONFIG.CEREMONY_RATIO_WARNING) {
         reminderParts.push(`WARNING: Ceremony ratio ${(ratio * 100).toFixed(0)}% -- increase substantive evidence.`);
       }
     }
@@ -1423,7 +1456,7 @@ ${buildFlarePlanningInjection()}`;
     const budget = checkTurnBudget();
     if (budget.exceeded) {
       reminderParts.push(`TURN BUDGET EXCEEDED: ${sessionMessageCount} turns. Wrap up now.`);
-    } else if (budget.remaining && budget.remaining < 20) {
+    } else if (budget.remaining && budget.remaining < CONFIG.TURN_BUDGET_WARNING) {
       reminderParts.push(`TURN BUDGET: ${budget.remaining} turns remaining. Prioritize.`);
     }
     const messages = [...event.messages];
