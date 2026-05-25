@@ -28,11 +28,14 @@ session gets:
 ## Installation
 
 ```bash
-pebkac init
+pebkac init --non-interactive --yes
 ```
 
-This installs the extension to `.omp/extensions/pebkac-defense.js` and creates
-the `.harness/` directory with default config.
+This installs the extension to `.omp/extensions/pebkac-defense.js`, creates
+the `.harness/` directory with default config, and writes onboarding state to
+`.harness/state/onboarding-preferences.json` plus telemetry consent to
+`.harness/state/telemetry-consent.json`. Interactive onboarding requires a real
+TTY; non-TTY runners must use `--non-interactive --yes`.
 
 ## Configuration
 
@@ -167,20 +170,23 @@ enough. LLMs need reminding.
 
 ## Architecture
 
-Single file. Zero dependencies. No build step. No framework.
+Small Bun CLI plus bundled extension. Zero runtime dependencies.
 
 ```
-.omp/extensions/pebkac-defense.js   (1607 lines, Bun/Node.js)
+bin/pebkac.js                         (CLI init/status entrypoint)
+.omp/extensions/pebkac-defense.js     (Bun/Node.js defense extension)
 .harness/
-  config.yaml                        (feature toggles)
-  audit.log                          (JSONL event log)
+  config.yaml                         (feature toggles)
+  audit.log                           (JSONL event log when telemetry is enabled)
   checkpoints/
-    latest.json                      (current state)
-    checkpoint-*.json                (backup snapshots)
+    latest.json                       (current state)
+    checkpoint-*.json                 (backup snapshots)
   state/
-    tool-versions.json               (detected tool versions)
+    onboarding-preferences.json       (theme/notification/health choices)
+    telemetry-consent.json            (audit/telemetry consent)
+    tool-versions.json                (detected tool versions)
   vault/
-    config.yaml                      (secret proxy config)
+    config.yaml                       (secret proxy config)
 ```
 
 The extension registers 9 event hooks and 5 slash commands. Every

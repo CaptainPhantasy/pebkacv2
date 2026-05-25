@@ -1,0 +1,12 @@
+{
+  "name": "pebkac-defense",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "pebkac": "bun ./bin/pebkac.js"
+  },
+  "bin": {
+    "pebkac": "./bin/pebkac.js"
+  }
+}

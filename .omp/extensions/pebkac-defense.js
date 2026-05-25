@@ -97,15 +97,22 @@ class CheckpointManager {
   setCurrentTask(task) {
     this.#state.currentTask = task;
   }
+  setItemStatus(itemId, status) {
+    this.#state.itemStatuses[itemId] = status;
+  }
   addEvidenceSummary(entry) {
     this.#state.evidenceSummary.push(entry);
     if (this.#state.evidenceSummary.length > 50) {
       this.#state.evidenceSummary = this.#state.evidenceSummary.slice(-50);
     }
   }
+  #checkpointInterval = 10;
+  setCheckpointInterval(n) {
+    this.#checkpointInterval = n;
+  }
   tick() {
     this.#turnCount++;
-    return this.#turnCount % 10 === 0;
+    return this.#turnCount % this.#checkpointInterval === 0;
   }
   async save() {
     this.#state.savedAt = Date.now();
@@ -196,6 +203,10 @@ ${this.#state.currentTask}`);
 class CircuitBreaker {
   #state = "closed";
   #openReason = "";
+  reset() {
+    this.#state = "closed";
+    this.#openReason = "";
+  }
   trip(reason) {
     if (this.#state === "closed") {
       this.#state = "open";
@@ -919,19 +930,69 @@ function serializeHandoff(handoff) {
 `);
 }
 function parseSubagentResult(output, durationMs) {
-  const hasEvidence = /\d+\s+pass/i.test(output) || /exit\s*code:?\s*0/i.test(output);
-  return {
-    status: hasEvidence ? "complete" : "blocked",
+  const result = {
+    status: "blocked",
     evidence: [],
     checkpointUpdates: {},
+    changedFiles: [],
+    blockers: [],
     output,
     durationMs
   };
+  // Try structured JSON parse first
+  try {
+    const parsed = JSON.parse(output);
+    if (parsed && typeof parsed === "object") {
+      result.status = parsed.status === "complete" ? "complete" : "blocked";
+      if (Array.isArray(parsed.evidence)) {
+        result.evidence = parsed.evidence.map((e) => {
+          if (typeof e === "string") return { description: e, verified: true };
+          return { description: e.description ?? "", type: e.type ?? "command_output", verified: e.verified !== false };
+        });
+      }
+      if (parsed.checkpointUpdates && typeof parsed.checkpointUpdates === "object") {
+        result.checkpointUpdates = parsed.checkpointUpdates;
+      }
+      if (Array.isArray(parsed.changedFiles)) result.changedFiles = parsed.changedFiles;
+      if (Array.isArray(parsed.blockers)) result.blockers = parsed.blockers;
+      if (parsed.blockerReason && typeof parsed.blockerReason === "string") result.blockers.push(parsed.blockerReason);
+      return result;
+    }
+  } catch {}
+  // Fallback: heuristic parsing from text output
+  const hasTestEvidence = /\d+\s+pass/i.test(output) || /exit\s*code:?\s*0/i.test(output);
+  const hasDiffEvidence = /^[+-]\s/m.test(output) || /file_diff/i.test(output);
+  const evidenceItems = [];
+  if (hasTestEvidence) evidenceItems.push({ description: "Test output detected", type: "test_result", verified: true });
+  if (hasDiffEvidence) evidenceItems.push({ description: "File diff detected", type: "file_diff", verified: true });
+  // Extract changed files from output
+  const fileMatches = output.matchAll(/(?:\/[\w\-./]+\.\w+)/g);
+  for (const m of fileMatches) result.changedFiles.push(m[0]);
+  // Extract blockers
+  const blockerMatch = output.match(/BLOCKED:\s*(.+)/i);
+  if (blockerMatch) result.blockers.push(blockerMatch[1].trim());
+  if (evidenceItems.length > 0 && result.blockers.length === 0) {
+    result.status = "complete";
+    result.evidence = evidenceItems;
+  }
+  return result;
 }
 
 // packages/pebkac-harness/src/core/rate-limiter.ts
 var TOOL_CALL_LIMIT = 50;
 var toolCallsThisTurn = 0;
+/** Reset all module-level state — for test isolation only */
+function resetAllState() {
+  breaker.reset();
+  toolCallsThisTurn = 0;
+  recentToolCalls = [];
+  consecutiveBlocks = 0;
+  turnsConsumed = 0;
+  turnBudget = null;
+  BLOCKED_TOOLS.clear();
+  ALLOWED_TOOLS = null;
+  evidenceHashes.clear();
+}
 function checkRateLimit() {
   toolCallsThisTurn++;
   if (toolCallsThisTurn >= TOOL_CALL_LIMIT) {
@@ -1029,6 +1090,9 @@ function checkToolAllowlist(toolName) {
 
 // packages/pebkac-harness/src/core/evidence-dedup.ts
 var evidenceHashes = new Set();
+var CONTENT_BEARING_TOOLS = new Set(["write", "edit", "notebook"]);
+// Module-level breaker — resetAllState() needs to reach it for test isolation
+const breaker = new CircuitBreaker;
 function hashEvidence(toolName, snippet) {
   // Simple hash: tool name + first 200 chars of normalized output
   const normalized = snippet.slice(0, 200).replace(/\s+/g, ' ').trim();
@@ -1084,6 +1148,37 @@ function buildSessionSummary(enforcer2, checkpoint2, turnCount, breakerState) {
   parts.push(`**Circuit breaker:** ${breakerState}`);
   return parts.join('\n');
 }
+const DEFAULT_ONBOARDING_PREFERENCES = Object.freeze({
+  theme: "standard",
+  telemetry: true,
+  notifications: true,
+  healthChecks: true
+});
+async function loadOnboardingPreferences(cwd) {
+  const prefs = { ...DEFAULT_ONBOARDING_PREFERENCES };
+  try {
+    const loaded = await Bun.file(path.join(cwd, ".harness", "state", "onboarding-preferences.json")).json();
+    if (typeof loaded.theme === "string" && loaded.theme.length > 0) prefs.theme = loaded.theme;
+    if (typeof loaded.telemetry === "boolean") prefs.telemetry = loaded.telemetry;
+    if (typeof loaded.notifications === "boolean") prefs.notifications = loaded.notifications;
+    if (typeof loaded.healthChecks === "boolean") prefs.healthChecks = loaded.healthChecks;
+  } catch {}
+  try {
+    const consent = await Bun.file(path.join(cwd, ".harness", "state", "telemetry-consent.json")).json();
+    if (typeof consent.enabled === "boolean") prefs.telemetry = consent.enabled;
+  } catch {}
+  return prefs;
+}
+function notify(ctx, prefs, message, level = "info") {
+  if (prefs.notifications || level === "warning" || level === "error") {
+    ctx.ui.notify(message, level);
+  }
+}
+async function appendAudit(auditLog, prefs, record) {
+  if (prefs.telemetry) {
+    await auditLog.append(record);
+  }
+}
 // packages/pebkac-harness/src/core/index.ts
 var CONTENT_BEARING_TOOLS = new Set(["write", "edit", "notebook"]);
 function pebkacDefenseExtension(pi) {
@@ -1099,13 +1194,60 @@ function pebkacDefenseExtension(pi) {
   let sessionMessageCount = 0;
   let hasFlarePlan = false;
   let currentPhase;
+  let loadedConfig = { evidenceRequired: true, deterministicPrompting: true, secretsIsolation: true, gitGuard: true };
+  let onboardingPreferences = { ...DEFAULT_ONBOARDING_PREFERENCES };
   pi.on("session_start", async (_event, ctx) => {
     enforcer = new EvidenceEnforcer;
     checkpoint = new CheckpointManager(ctx.cwd);
     auditLog = new AuditLog(ctx.cwd);
     await Promise.all([checkpoint.init(), auditLog.init()]);
+    onboardingPreferences = await loadOnboardingPreferences(ctx.cwd);
     ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
-    await auditLog.append({
+    // Load config.yaml and apply defaults
+    try {
+      const configPath = `${ctx.cwd}/.harness/config.yaml`;
+      const configText = await Bun.file(configPath).text();
+      const config = (await import(`${configPath}?raw`)).default || {};
+      // Parse simple YAML defaults section manually (no YAML dependency)
+      const defaults = {};
+      const defaultsMatch = configText.match(/defaults:\s*\n([\s\S]*?)(?:\n\S|\n*$)/);
+      if (defaultsMatch) {
+        for (const line of defaultsMatch[1].split("\n")) {
+          const kv = line.match(/^\s+(\w+):\s*(.+)/);
+          if (kv) defaults[kv[1]] = kv[2].trim();
+        }
+      }
+      // Apply config to module-level state
+      if (defaults.checkpoint_interval) {
+        const interval = parseInt(defaults.checkpoint_interval, 10);
+        if (!isNaN(interval) && interval > 0) checkpoint.setCheckpointInterval(interval);
+      }
+      if (defaults.tool_call_limit) {
+        TOOL_CALL_LIMIT = parseInt(defaults.tool_call_limit, 10) || 50;
+      }
+      if (defaults.turn_budget) {
+        setTurnBudget(parseInt(defaults.turn_budget, 10));
+      }
+      if (defaults.escalation_threshold) {
+        ESCALATION_THRESHOLD = parseInt(defaults.escalation_threshold, 10);
+      }
+      // Store loaded config for guard conditionals
+      loadedConfig = {
+        evidenceRequired: defaults.evidence_required !== "false",
+        deterministicPrompting: defaults.deterministic_prompting !== "false",
+        secretsIsolation: defaults.secrets_isolation !== "false",
+        gitGuard: defaults.git_guard !== "false",
+      };
+    } catch {
+      // Config missing or invalid — use hard-coded defaults (current behavior)
+      loadedConfig = {
+        evidenceRequired: true,
+        deterministicPrompting: true,
+        secretsIsolation: true,
+        gitGuard: true,
+      };
+    }
+    await appendAudit(auditLog, onboardingPreferences, {
       timestamp: Date.now(),
       event: "session_start",
       details: { cwd: ctx.cwd }
@@ -1142,11 +1284,18 @@ ${buildGroundingInjection(realityProfile)}`;
     if (taskDesc) {
       const compiled = compileContract(taskDesc);
       if (compiled) {
+        // Persist contract items to checkpoint
+        if (checkpoint) {
+          checkpoint.setCurrentTask(taskDesc);
+          for (const item of compiled.items) {
+            checkpoint.setItemStatus(item.id, "pending");
+          }
+          await checkpoint.save();
+        }
         const rules = compiled.items.map((item) => item.description);
         const conflicts = detectConflicts(rules);
         if (conflicts.hasConflicts && conflicts.resolution === "rejected") {
           fullPrompt += `
-
 [PEBKAC] WARNING: Conflicting constraints detected in task. Review the contract carefully.`;
         }
       }
@@ -1213,7 +1362,7 @@ ${buildFlarePlanningInjection()}`;
       } else if (enforcer.turnEvidenceCount > 0) {
         breaker.recordEvidence();
       }
-      await auditLog.append({
+      await appendAudit(auditLog, onboardingPreferences, {
         timestamp: Date.now(),
         event: "turn_end",
         details: { metrics, breakerState: breaker.state }
@@ -1223,6 +1372,8 @@ ${buildFlarePlanningInjection()}`;
     const budget = checkTurnBudget();
     if (budget.exceeded && checkpoint) {
       const summary = buildSessionSummary(enforcer, checkpoint, sessionMessageCount, breaker.state);
+      // Persist summary to checkpoint for audit/recovery
+      checkpoint.addEvidenceSummary(`[SESSION SUMMARY]\n${summary}`);
       await checkpoint.addEvidenceSummary(`[TURN BUDGET] ${sessionMessageCount} turns consumed`);
       await checkpoint.save();
     }
@@ -1246,16 +1397,19 @@ ${buildFlarePlanningInjection()}`;
     const escalation = checkEscalation();
     if (escalation.escalated) {
       failedToolCallsThisTurn++;
+      recordBlock();
       return { block: true, reason: escalation.reason };
     }
     // Tool allowlist/blocklist
     const toolPolicy = checkToolAllowlist(event.toolName);
     if (toolPolicy.blocked) {
       failedToolCallsThisTurn++;
+      recordBlock();
       return { block: true, reason: toolPolicy.reason };
     }
     if (breaker.state === "half-open" && event.toolName !== "harness-status" && event.toolName !== "harness-audit") {
       failedToolCallsThisTurn++;
+      recordBlock();
       return {
         block: true,
         reason: "Circuit half-open: only retrieval commands are allowed until evidence is produced."
@@ -1263,12 +1417,14 @@ ${buildFlarePlanningInjection()}`;
     }
     if (breaker.isOpen) {
       failedToolCallsThisTurn++;
+      recordBlock();
       return { block: true, reason: breaker.buildCorrectionMessage() };
     }
     const effectivePhase = currentPhase ?? "implementation";
     const policyResult = checkToolPolicy(effectivePhase, event.toolName);
     if (!policyResult.allowed) {
       failedToolCallsThisTurn++;
+      recordBlock();
       return { block: true, reason: policyResult.reason };
     }
     if (event.toolName === "bash") {
@@ -1276,11 +1432,13 @@ ${buildFlarePlanningInjection()}`;
       const gitResult = evaluateGitCommand(command);
       if (gitResult.blocked) {
         failedToolCallsThisTurn++;
+        recordBlock();
         return { block: true, reason: gitResult.reason };
       }
       const secretsResult = checkSecretExposure(command);
       if (secretsResult.blocked) {
         failedToolCallsThisTurn++;
+        recordBlock();
         return { block: true, reason: secretsResult.reason };
       }
     }
@@ -1291,6 +1449,7 @@ ${buildFlarePlanningInjection()}`;
         const contentResult = checkSecretExposureInContent(content);
         if (contentResult.blocked) {
           failedToolCallsThisTurn++;
+          recordBlock();
           return { block: true, reason: contentResult.reason };
         }
       }
@@ -1308,6 +1467,7 @@ ${buildFlarePlanningInjection()}`;
       // Output length guard
       text = guardOutputLength(text);
       if (containsSecrets(text)) {
+        text = redactSecrets(text);
         modified = true;
       }
       if (enforcer) {
@@ -1329,6 +1489,7 @@ ${buildFlarePlanningInjection()}`;
             checkpoint.addEvidenceSummary(`[${event.toolName}] ${text.slice(0, 100).replace(/\n/g, " ")}`);
           }
           breaker.recordEvidence();
+          resetEscalation();
         }
         // Forbidden behavior scan -- detect harness mentions in output
         const forbidden = scanForbiddenBehavior(text);
@@ -1436,6 +1597,10 @@ ${buildFlarePlanningInjection()}`;
   pi.registerCommand("harness-status", {
     description: "Show PEBKAC harness defense status and evidence ledger",
     handler: async (_args, ctx) => {
+      // Breaker recovery: status check transitions open → half-open
+      if (breaker.isOpen) {
+        breaker.halfOpen();
+      }
       const status = [
         "## PEBKAC Harness Status",
         "",
@@ -1462,6 +1627,10 @@ ${buildFlarePlanningInjection()}`;
       ];
       status.push(`| L4 | FLARE Planner | ${hasFlarePlan ? "Plan complete" : currentPhase === "planning" ? "Planning" : "Available"} |`);
       status.push(`| L4 | Lifecycle Phase | ${currentPhase ?? "implementation"} (messages: ${sessionMessageCount}) |`);
+      status.push(`| Preferences | Theme | ${onboardingPreferences.theme} |`);
+      status.push(`| Preferences | Notifications | ${onboardingPreferences.notifications ? "Enabled" : "Disabled"} |`);
+      status.push(`| Preferences | Telemetry | ${onboardingPreferences.telemetry ? "Enabled" : "Disabled"} |`);
+      status.push(`| Preferences | Health Checks | ${onboardingPreferences.healthChecks ? "Enabled" : "Disabled"} |`);
       if (enforcer) {
         const ledger = enforcer.getLedger();
         status.push("");
@@ -1469,7 +1638,7 @@ ${buildFlarePlanningInjection()}`;
         status.push(`**Ceremony Ratio:** ${(enforcer.getCeremonyRatio() * 100).toFixed(1)}%`);
         status.push(`**Turns Without Evidence:** ${turnsWithoutEvidence}`);
       }
-      ctx.ui.notify(status.join(`
+      notify(ctx, onboardingPreferences, status.join(`
 `), "info");
     }
   });
@@ -1478,7 +1647,7 @@ ${buildFlarePlanningInjection()}`;
     handler: async (_args, ctx) => {
       hasFlarePlan = true;
       currentPhase = inferPhase(sessionMessageCount, hasFlarePlan);
-      ctx.ui.notify(`FLARE plan marked complete. Phase transitioned to: ${currentPhase ?? "implementation"}. Implementation tools now enabled.`, "info");
+      notify(ctx, onboardingPreferences, `FLARE plan marked complete. Phase transitioned to: ${currentPhase ?? "implementation"}. Implementation tools now enabled.`, "info");
     }
   });
   let activePipeline = null;
@@ -1497,7 +1666,7 @@ ${buildFlarePlanningInjection()}`;
         timeoutMs: 30 * 60 * 1000
       };
       const serialized = serializeHandoff(handoff);
-      ctx.ui.notify([
+      notify(ctx, onboardingPreferences, [
         "## Subagent Handoff Generated",
         "",
         "Copy this to a fresh agent context:",
@@ -1516,10 +1685,59 @@ ${buildFlarePlanningInjection()}`;
     handler: async (args, ctx) => {
       const output = args;
       const result = parseSubagentResult(output, 0);
+      // Reject malformed/incomplete results
+      if (!output || output.trim().length === 0) {
+        notify(ctx, onboardingPreferences, "Subtask result rejected: empty output.", "warning");
+        return;
+      }
       if (result.status === "complete") {
-        ctx.ui.notify(`Subtask completed. Evidence items: ${result.evidence.length}`, "info");
+        // Record evidence into ledger
+        for (const ev of result.evidence) {
+          if (enforcer) {
+            enforcer.recordEvidence({
+              itemId: "subagent",
+              actionDescription: ev.description,
+              evidenceSnippet: output.slice(0, 500),
+              verifier: "subagent",
+              verified: ev.verified !== false,
+              timestamp: Date.now(),
+              type: ev.type ?? "command_output",
+            });
+          }
+        }
+        // Apply checkpoint updates
+        if (checkpoint && result.checkpointUpdates) {
+          const upd = result.checkpointUpdates;
+          if (upd.currentTask) checkpoint.setCurrentTask(upd.currentTask);
+          if (Array.isArray(upd.workingApproaches)) {
+            for (const a of upd.workingApproaches) checkpoint.recordWorkingApproach(a);
+          }
+          if (Array.isArray(upd.failedApproaches)) {
+            for (const f of upd.failedApproaches) checkpoint.recordFailedApproach(f.approach ?? f, f.reason ?? "subagent reported failure");
+          }
+          if (upd.itemStatuses) {
+            for (const [id, status] of Object.entries(upd.itemStatuses)) {
+              checkpoint.setItemStatus(id, status);
+              if (enforcer) enforcer.requestTransition(id, status);
+            }
+          }
+        }
+        // Record evidence in checkpoint summary
+        if (checkpoint) {
+          checkpoint.addEvidenceSummary(`[subagent] completed: ${result.evidence.length} evidence items, ${result.changedFiles.length} files changed`);
+          await checkpoint.save();
+        }
+        notify(ctx, onboardingPreferences, `Subtask completed. Evidence: ${result.evidence.length}, Files: ${result.changedFiles.length}`, "info");
       } else {
-        ctx.ui.notify(`Subtask blocked. Review output for blockers.`, "warning");
+        // Record blocker
+        if (checkpoint && result.blockers.length > 0) {
+          for (const b of result.blockers) {
+            checkpoint.recordFailedApproach("subagent", b);
+          }
+          checkpoint.addEvidenceSummary(`[subagent] blocked: ${result.blockers.join("; ")}`);
+          await checkpoint.save();
+        }
+        notify(ctx, onboardingPreferences, `Subtask blocked. Reasons: ${result.blockers.join("; ") || "no evidence produced"}`, "warning");
       }
     }
   });
@@ -1541,16 +1759,16 @@ ${buildFlarePlanningInjection()}`;
             };
           });
           if (stages.length === 0) {
-            ctx.ui.notify("Usage: /harness-pipeline start Build:test,lint Deploy:exit_code", "warning");
+            notify(ctx, onboardingPreferences, "Usage: /harness-pipeline start Build:test,lint Deploy:exit_code", "warning");
             return;
           }
           activePipeline = new SequentialPipeline(stages);
-          ctx.ui.notify(`Pipeline started with ${stages.length} stages. Current: ${activePipeline.currentStage?.name ?? "none"}`, "info");
+          notify(ctx, onboardingPreferences, `Pipeline started with ${stages.length} stages. Current: ${activePipeline.currentStage?.name ?? "none"}`, "info");
           break;
         }
         case "status": {
           if (!activePipeline) {
-            ctx.ui.notify("No active pipeline. Use /harness-pipeline start <stages>", "warning");
+            notify(ctx, onboardingPreferences, "No active pipeline. Use /harness-pipeline start <stages>", "warning");
             return;
           }
           const current = activePipeline.currentStage;
@@ -1564,36 +1782,44 @@ ${buildFlarePlanningInjection()}`;
             "### Results:",
             ...results.map((r) => `- ${r.stageId}: ${r.status}${r.blockerReason ? ` (${r.blockerReason})` : ""}`)
           ];
-          ctx.ui.notify(status.join(`
+          notify(ctx, onboardingPreferences, status.join(`
 `), "info");
           break;
         }
         case "complete": {
           if (!activePipeline) {
-            ctx.ui.notify("No active pipeline.", "warning");
+            notify(ctx, onboardingPreferences, "No active pipeline.", "warning");
             return;
           }
           const result = activePipeline.completeStage(rest);
           if (result.status === "complete") {
             const next = activePipeline.currentStage;
-            ctx.ui.notify(`Stage ${result.stageId} complete. ${next ? `Next: ${next.name}` : "Pipeline complete!"}`, "info");
+            if (checkpoint) {
+              checkpoint.addEvidenceSummary(`[pipeline] stage ${result.stageId} complete`);
+              await checkpoint.save();
+            }
+            notify(ctx, onboardingPreferences, `Stage ${result.stageId} complete. ${next ? `Next: ${next.name}` : "Pipeline complete!"}`, "info");
           } else {
-            ctx.ui.notify(`Stage ${result.stageId} blocked: ${result.blockerReason}`, "warning");
+            if (checkpoint) {
+              checkpoint.recordFailedApproach(`pipeline:${result.stageId}`, result.blockerReason);
+              await checkpoint.save();
+            }
+            notify(ctx, onboardingPreferences, `Stage ${result.stageId} blocked: ${result.blockerReason}`, "warning");
           }
           break;
         }
         case "block": {
           if (!activePipeline) {
-            ctx.ui.notify("No active pipeline.", "warning");
+            notify(ctx, onboardingPreferences, "No active pipeline.", "warning");
             return;
           }
           const reason = rest.join(" ") || "Blocked by user";
           const result = activePipeline.blockStage(reason);
-          ctx.ui.notify(`Stage ${result.stageId} blocked: ${reason}`, "warning");
+          notify(ctx, onboardingPreferences, `Stage ${result.stageId} blocked: ${reason}`, "warning");
           break;
         }
         default:
-          ctx.ui.notify(`Usage: /harness-pipeline <start|status|complete|block> [args]
+          notify(ctx, onboardingPreferences, `Usage: /harness-pipeline <start|status|complete|block> [args]
 ` + `  start Build:test,lint Deploy:exit_code  - Start pipeline
 ` + `  status                                  - Show current state
 ` + `  complete test lint                      - Complete stage with evidence
@@ -1603,5 +1829,6 @@ ${buildFlarePlanningInjection()}`;
   });
 }
 export {
-  pebkacDefenseExtension as default
+  pebkacDefenseExtension as default,
+  resetAllState
 };
