@@ -998,7 +998,7 @@ function resetAllState() {
 }
 function checkRateLimit() {
   toolCallsThisTurn++;
-  if (toolCallsThisTurn >= TOOL_CALL_LIMIT) {
+  if (toolCallsThisTurn > TOOL_CALL_LIMIT) {
     return { blocked: true, reason: `[HARNESS RATE LIMIT] ${toolCallsThisTurn} tool calls this turn. Limit: ${TOOL_CALL_LIMIT}. Stop retrying and produce evidence or report BLOCKED.` };
   }
   return { blocked: false };

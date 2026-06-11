@@ -752,7 +752,7 @@ describe("Quiet mode (--quiet / -q)", () => {
     }
   });
 
-  test("status --json --quiet produces no stdout (quiet wins)", () => {
+  test("status --json --quiet still produces JSON (machine output always prints)", () => {
     const cwd = tempRoot();
     try {
       const result = Bun.spawnSync({
@@ -762,7 +762,9 @@ describe("Quiet mode (--quiet / -q)", () => {
       });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(1);
-      expect(stdout.trim()).toBe("");
+      // --json output always prints, even with --quiet (machine-readable mode)
+      const parsed = JSON.parse(stdout);
+      expect(parsed.healthy).toBe(false);
     } finally {
       cleanup(cwd);
     }

@@ -39,6 +39,12 @@ function hasFlag(name) {
 
 const quietMode = hasFlag("--quiet") || hasFlag("-q");
 const verboseMode = hasFlag("--verbose") || hasFlag("-V");
+const KNOWN_FLAGS = new Set(["--quiet", "-q", "--verbose", "-V", "--json", "--cwd", "--help", "--non-interactive", "--yes", "--version", "-v", "--dry-run", "--theme", "--verbosity", "--enabled", "--no-enabled", "--telemetry", "--no-telemetry", "--notifications", "--no-notifications", "--health-checks", "--no-health-checks"]);
+const unknownFlags = args.filter(a => a.startsWith("-") && !KNOWN_FLAGS.has(a));
+if (unknownFlags.length > 0 && !args.includes("completion")) {
+  console.error(`${yellow("Warning:")} Unknown flag${unknownFlags.length > 1 ? "s" : ""}: ${unknownFlags.join(", ")}`);
+  suggest("Run `pebkac help` for available options.");
+}
 function quietLog(...items) { if (!quietMode) console.log(...items); }
 function verboseLog(...items) { if (verboseMode && !quietMode) console.log(dim(`  ${items.join(" ")}`)); }
 function suggest(msg) { console.error(dim(`  Suggestion: ${msg}`)); }
@@ -48,7 +54,14 @@ function tableRow(statusIcon, labelText, valueText, width = 13) {
 
 function optionValue(name, fallback = undefined) {
   const index = args.indexOf(name);
-  if (index >= 0 && index + 1 < args.length) return args[index + 1];
+  if (index >= 0 && index + 1 < args.length) {
+    const val = args[index + 1];
+    if (val.startsWith("-")) {
+      console.error(`${red("Error:")} ${name} requires a value, got flag "${val}"`);
+      process.exit(2);
+    }
+    return val;
+  }
   return fallback;
 }
 
@@ -110,7 +123,13 @@ function init() {
   }
 
   ensureProject(targetCwd);
-  copyFileSync(join(repoRoot, ".omp", "extensions", "pebkac-defense.js"), join(targetCwd, ".omp", "extensions", "pebkac-defense.js"));
+  const srcExt = join(repoRoot, ".omp", "extensions", "pebkac-defense.js");
+  if (!existsSync(srcExt)) {
+    console.error(`${red("Error:")} Extension source not found: ${dim(srcExt)}`);
+    suggest("Re-clone the repository or check .omp/extensions/ directory.");
+    process.exit(1);
+  }
+  copyFileSync(srcExt, join(targetCwd, ".omp", "extensions", "pebkac-defense.js"));
 
   // Backward compat: --theme minimal maps to verbosity quiet
   const themeFlag = optionValue("--theme", null);
@@ -183,8 +202,13 @@ function on() {
   const targetCwd = resolve(optionValue("--cwd", process.cwd()));
   const sentinelPath = join(targetCwd, ".harness", "state", "disabled");
   if (existsSync(sentinelPath)) {
-    unlinkSync(sentinelPath);
-    quietLog(`${green(label("RE-ENABLED"))}  ${dim(targetCwd)}`);
+    try {
+      unlinkSync(sentinelPath);
+      quietLog(`${green(label("RE-ENABLED"))}  ${dim(targetCwd)}`);
+    } catch (err) {
+      console.error(`${red("Error:")} Could not remove sentinel: ${err.message}`);
+      process.exit(1);
+    }
   } else {
     quietLog(`${icon("info")} PEBKAC already enabled for ${dim(targetCwd)}`);
   }
@@ -286,7 +310,7 @@ function statusCommand() {
       sessionReports: reports,
       lastHealthCheck: healthTime,
     };
-    quietLog(JSON.stringify(output, null, 2));
+    console.log(JSON.stringify(output, null, 2));
     if (issues > 0) process.exit(1);
     return;
   }
@@ -447,7 +471,7 @@ function doctorCommand() {
   if (!checks.vault.present) issues++;
 
   if (jsonMode) {
-    quietLog(JSON.stringify({ cwd: targetCwd, healthy: issues === 0, issues, checks }, null, 2));
+    console.log(JSON.stringify({ cwd: targetCwd, healthy: issues === 0, issues, checks }, null, 2));
     if (issues > 0) process.exit(1);
     return;
   }
@@ -535,8 +559,11 @@ function configCommand() {
       const nextSection = afterSection.indexOf("\n\n");
       const block = nextSection > 0 ? afterSection.slice(0, nextSection) : afterSection;
       const leafRe = new RegExp(`^\\s+${parts[1]}:\\s*(.+)$`, "m");
-      const m = leafRe.exec(block);
-      return m ? m[1].replace(/^["']|["']$/g, "").trim() : undefined;
+      // Filter out commented lines from matches
+      const lines = block.split("\n").filter(l => !l.trim().startsWith("#"));
+      const filteredBlock = lines.join("\n");
+      const m2 = leafRe.exec(filteredBlock);
+      return m2 ? m2[1].replace(/^["']|["']$/g, "").trim() : undefined;
     }
     const re = new RegExp(`^${parts[0]}:\\s*(.+)$`, "m");
     const m = re.exec(text);
@@ -671,16 +698,22 @@ complete -c pebkac -l yes -d "Use defaults"`);
   }
 }
 
-if (command === "init") init();
-else if (command === "status") statusCommand();
-else if (command === "off") off();
-else if (command === "on") on();
-else if (command === "launch") launchCommand();
-else if (command === "doctor") doctorCommand();
-else if (command === "version" || hasFlag("--version") || hasFlag("-v")) versionCommand();
-else if (command === "config") configCommand();
-else if (command === "completion") completionCommand();
-else {
-  quietLog(usage());
-  process.exit(command === "help" || hasFlag("--help") ? 0 : 1);
+try {
+  if (command === "init") init();
+  else if (command === "status") statusCommand();
+  else if (command === "off") off();
+  else if (command === "on") on();
+  else if (command === "launch") launchCommand();
+  else if (command === "doctor") doctorCommand();
+  else if (command === "version" || hasFlag("--version") || hasFlag("-v")) versionCommand();
+  else if (command === "config") configCommand();
+  else if (command === "completion") completionCommand();
+  else {
+    quietLog(usage());
+    process.exit(command === "help" || hasFlag("--help") ? 0 : 1);
+  }
+} catch (err) {
+  console.error(`${red("Error:")} ${err.message}`);
+  suggest("Run `pebkac doctor` for diagnostics.");
+  process.exit(1);
 }
