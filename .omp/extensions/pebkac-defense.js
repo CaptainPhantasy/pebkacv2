@@ -861,7 +861,9 @@ function capInput(input) {
   return input.length > MAX_SCAN_LENGTH ? input.slice(0, MAX_SCAN_LENGTH) : input;
 }
 function checkSecretExposure(command) {
-  const capped = capInput(command);
+  // Strip git commit message payload — it's not a command vector for secret exposure
+  const scanTarget = command.replace(/\bgit\s+commit\s+-m\s+["']?/, "git commit ");
+  const capped = capInput(scanTarget);
   for (const pattern of SECRET_EXPOSURE_COMMANDS) {
     if (pattern.test(capped)) {
       return {
