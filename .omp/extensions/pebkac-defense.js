@@ -1576,6 +1576,14 @@ function pebkacDefenseExtension(pi) {
 
   // ==================== COMMANDS ====================
 
+  // Store handlers for alias registration
+  const commandHandlers = {};
+  const _origRegister = pi.registerCommand.bind(pi);
+  pi.registerCommand = (name, def) => {
+    commandHandlers[name] = def.handler;
+    _origRegister(name, def);
+  };
+
   pi.registerCommand("harness-status", {
     description: "Show PEBKAC harness defense status and evidence ledger",
     handler: async (_args, ctx) => {
@@ -1755,6 +1763,16 @@ function pebkacDefenseExtension(pi) {
       }
     }
   });
+  // ==================== COMMAND ALIASES ====================
+  const aliases = [
+    ["hs", "harness-status"], ["ho", "harness-off"], ["hon", "harness-on"],
+    ["hr", "harness-reload"], ["hrep", "harness-report"], ["hd", "harness-delegate"],
+    ["hsr", "harness-subagent-result"], ["hp", "harness-pipeline"], ["fc", "flare-complete"],
+  ];
+  for (const [alias, target] of aliases) {
+    const handler = commandHandlers[target];
+    if (handler) _origRegister(alias, { description: `Alias for /${target}`, handler });
+  }
 }
 export {
   pebkacDefenseExtension as default,

@@ -438,8 +438,219 @@ describe("CLI status command", () => {
       });
       const stdout = new TextDecoder().decode(statusResult.stdout);
       expect(statusResult.exitCode).toBe(0);
-      expect(stdout).toContain("Extension: present");
-      expect(stdout).toContain("Config: present");
+      expect(stdout).toContain("Extension");
+      expect(stdout).toContain("present");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+});
+
+describe("CLI colorized output", () => {
+  test("version command prints version", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "version"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("PEBKAC");
+    expect(stdout).toContain("1.0.0");
+  });
+
+  test("--version flag also works", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "--version"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("1.0.0");
+  });
+
+  test("init output shows next steps", () => {
+    const cwd = tempRoot();
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      expect(result.exitCode).toBe(0);
+      expect(stdout).toContain("Next steps");
+      expect(stdout).toContain("pebkac launch");
+      expect(stdout).toContain("pebkac doctor");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("doctor output uses PASS/FAIL markers", () => {
+    const cwd = tempRoot();
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "doctor", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      // Should have FAIL markers for uninitialized project
+      expect(stdout).toContain("PASS");
+      expect(stdout).toContain("FAIL");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("off output shows re-enable instructions", () => {
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      const result = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "off", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(result.stdout);
+      expect(result.exitCode).toBe(0);
+      expect(stdout).toContain("DISABLED");
+      expect(stdout).toContain("Re-enable");
+      expect(stdout).toContain("pebkac on");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("NO_COLOR strips ANSI codes", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "version"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+      env: { ...process.env, NO_COLOR: "1" },
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("PEBKAC");
+    // With NO_COLOR, no ANSI escape sequences
+    expect(stdout).not.toContain("\x1b[");
+  });
+});
+
+describe("Slash command aliases", () => {
+  test("all short aliases are registered", () => {
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, 'version: "1.0"\ndefaults:\n  evidence_required: true\n  secrets_isolation: true\n  git_guard: true\n  verbosity: "full"\n  enabled: true\n');
+      const pi = makePi(cwd);
+      const cmds = Object.keys(pi.commands);
+      const aliases = ["hs", "ho", "hon", "hr", "hrep", "hd", "hsr", "hp", "fc"];
+      for (const alias of aliases) {
+        expect(cmds).toContain(alias);
+      }
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("hs alias description references harness-status", () => {
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, 'version: "1.0"\ndefaults:\n  evidence_required: true\n  secrets_isolation: true\n  git_guard: true\n  verbosity: "full"\n  enabled: true\n');
+      const pi = makePi(cwd);
+      // makePi stores handler only; check that alias key exists
+      expect(pi.commands["hs"]).toBeDefined();
+      expect(pi.commands["harness-status"]).toBeDefined();
+      // Same handler reference
+      expect(pi.commands["hs"]).toBe(pi.commands["harness-status"]);
+    } finally {
+      cleanup(cwd);
+    }
+  });
+});
+
+describe("JSON output mode", () => {
+  test("status --json outputs valid JSON with expected keys", () => {
+    const cwd = tempRoot();
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      const jsonResult = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "status", "--json", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(jsonResult.stdout);
+      expect(jsonResult.exitCode).toBe(0);
+      const data = JSON.parse(stdout);
+      expect(data.healthy).toBe(true);
+      expect(data.extension.present).toBe(true);
+      expect(data.config.present).toBe(true);
+      expect(data).toHaveProperty("issues");
+      expect(data).toHaveProperty("disabled");
+      expect(data).toHaveProperty("checkpoints");
+      expect(data).toHaveProperty("runtime");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("doctor --json outputs valid JSON with checks", () => {
+    const cwd = tempRoot();
+    try {
+      const result = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      const jsonResult = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "doctor", "--json", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(jsonResult.stdout);
+      expect(jsonResult.exitCode).toBe(0);
+      const data = JSON.parse(stdout);
+      expect(data.healthy).toBe(true);
+      expect(data.checks.extension.present).toBe(true);
+      expect(data.checks.config.present).toBe(true);
+      expect(data.checks.config.valid).toBe(true);
+      expect(data.checks.stateDir.present).toBe(true);
+      expect(data.checks.disabled.active).toBe(false);
+      expect(data.checks.checkpoints.present).toBe(true);
+      expect(data.checks.vault.present).toBe(true);
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("doctor --json reports failures correctly", () => {
+    const cwd = tempRoot();
+    try {
+      const jsonResult = Bun.spawnSync({
+        cmd: ["bun", "./bin/pebkac.js", "doctor", "--json", "--cwd", cwd],
+        cwd: process.cwd(),
+        stdout: "pipe", stderr: "pipe",
+      });
+      const stdout = new TextDecoder().decode(jsonResult.stdout);
+      expect(jsonResult.exitCode).toBe(1);
+      const data = JSON.parse(stdout);
+      expect(data.healthy).toBe(false);
+      expect(data.issues).toBeGreaterThan(0);
+      expect(data.checks.extension.present).toBe(false);
     } finally {
       cleanup(cwd);
     }
