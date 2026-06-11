@@ -95,6 +95,70 @@ Exit codes: 0 = success/healthy, 1 = issues found, 2 = usage error
 `;
 }
 
+const COMMAND_HELP = {
+  init: `pebkac init [--non-interactive] [--yes] [--cwd <path>]
+
+Initialize PEBKAC harness in a project. Creates .harness/ config and
+installs the defense extension to .omp/extensions/.
+
+Options:
+  --non-interactive    Skip interactive prompts
+  --yes                Accept defaults for all prompts
+  --cwd <path>         Target project directory
+  --verbosity          Set verbosity (full|normal|quiet)
+  --telemetry/--no-telemetry     Enable/disable telemetry
+  --notifications/--no-notifications  Enable/disable notifications
+  --health-checks/--no-health-checks  Enable/disable health checks`,
+  status: `pebkac status [--json] [--quiet] [-q] [--verbose] [-V] [--cwd <path>]
+
+Show harness status: extension presence, config validity, disabled state.
+Exit code reflects health (0=healthy, 1=issues).
+
+Options:
+  --json       Machine-readable JSON output
+  --quiet, -q  Suppress output; exit code only
+  --verbose    Show file paths and raw config data`,
+  doctor: `pebkac doctor [--json] [--quiet] [-q] [--verbose] [-V] [--cwd <path>]
+
+Run diagnostic checks: extension, config, state dir, checkpoints, vault.
+Exit code reflects health (0=healthy, 1=issues found).
+
+Options:
+  --json       Machine-readable JSON output with check details
+  --quiet, -q  Suppress output; exit code only
+  --verbose    Show file paths and raw check data`,
+  off: `pebkac off [--cwd <path>]
+
+Disable PEBKAC harness for this project. Creates a sentinel file.
+Re-enable with: pebkac on`,
+  on: `pebkac on [--cwd <path>]
+
+Re-enable PEBKAC harness. Removes the disabled sentinel file.`,
+  launch: `pebkac launch [--dry-run] [--cwd <path>]
+
+Launch the configured agent runtime with PEBKAC defense loaded.
+
+Options:
+  --dry-run    Print the command without executing`,
+  version: `pebkac version [--quiet] [-q]
+
+Print PEBKAC version. Also available via --version or -v flags.`,
+  config: `pebkac config <get|set|list> [key] [value] [--cwd <path>]
+
+Manage .harness/config.yaml values.
+
+Subcommands:
+  get <key>    Read a config value (supports dot notation: defaults.verbosity)
+  set <key> <value>  Write a config value
+  list         Show full config`,
+  completion: `pebkac completion <bash|zsh|fish>
+
+Generate shell completion script. Add to your shell profile:
+  eval "$(pebkac completion bash)"
+  eval "$(pebkac completion zsh)"
+  pebkac completion fish | source`,
+};
+
 function boolFromFlags(enable, disable, fallback) {
   if (hasFlag(disable)) return false;
   if (hasFlag(enable)) return true;
@@ -708,9 +772,22 @@ try {
   else if (command === "version" || hasFlag("--version") || hasFlag("-v")) versionCommand();
   else if (command === "config") configCommand();
   else if (command === "completion") completionCommand();
+  else if (command === "help") {
+    const helpTarget = args.find((a, i) => i > 0 && !a.startsWith("-") && a !== "help");
+    if (helpTarget && COMMAND_HELP[helpTarget]) {
+      quietLog(COMMAND_HELP[helpTarget]);
+      process.exit(0);
+    } else if (helpTarget) {
+      console.error(red(`Unknown command: ${helpTarget}`));
+      suggest("Run `pebkac help` for available commands.");
+      process.exit(1);
+    }
+    quietLog(usage());
+    process.exit(0);
+  }
   else {
     quietLog(usage());
-    process.exit(command === "help" || hasFlag("--help") ? 0 : 1);
+    process.exit(1);
   }
 } catch (err) {
   console.error(`${red("Error:")} ${err.message}`);

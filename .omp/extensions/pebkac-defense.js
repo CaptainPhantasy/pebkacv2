@@ -848,15 +848,15 @@ var SECRET_EXPOSURE_COMMANDS = [
   /echo\s+\$\{?\w*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\w*\}?/i
 ];
 var SECRET_PATTERNS = [
-  /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-  /(?<=AWS_SECRET_ACCESS_KEY\s*=\s*)[A-Za-z0-9/+=]{40}/g,
-  /(?<=(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY)\s*=\s*["']?)[A-Za-z0-9_\-./+=]{20,}/gi,
-  /(?<=Bearer\s+)[A-Za-z0-9_\-./+=]{20,}/g,
-  /(?<=:\/\/\w+:)[^@]+(?=@)/g,
-  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-  /gh[pousr]_[A-Za-z0-9_]{36,}/g,
-  /sk_(?:live|test)_[A-Za-z0-9]{24,}/g,
-  /xox[bpoas]-[A-Za-z0-9-]+/g
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /(?<=AWS_SECRET_ACCESS_KEY\s*=\s*)[A-Za-z0-9/+=]{40}/,
+  /(?<=(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY)\s*=\s*["']?)[A-Za-z0-9_\-./+=]{20,}/i,
+  /(?<=Bearer\s+)[A-Za-z0-9_\-./+=]{20,}/,
+  /(?<=:\/\/\w+:)[^@]+(?=@)/,
+  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/,
+  /gh[pousr]_[A-Za-z0-9_]{36,}/,
+  /sk_(?:live|test)_[A-Za-z0-9]{24,}/,
+  /xox[bpoas]-[A-Za-z0-9-]+/
 ];
 function capInput(input) {
   return input.length > MAX_SCAN_LENGTH ? input.slice(0, MAX_SCAN_LENGTH) : input;
@@ -878,8 +878,9 @@ function checkSecretExposure(command) {
 function redactSecrets(output) {
   let sanitized = capInput(output);
   for (const pattern of SECRET_PATTERNS) {
-    pattern.lastIndex = 0;
-    sanitized = sanitized.replace(pattern, "[REDACTED]");
+    // Create global copy for multi-match replacement
+    const globalPattern = new RegExp(pattern.source, pattern.flags.includes("i") ? "gi" : "g");
+    sanitized = sanitized.replace(globalPattern, "[REDACTED]");
   }
   if (output.length > MAX_SCAN_LENGTH) {
     sanitized += output.slice(MAX_SCAN_LENGTH);
@@ -888,10 +889,7 @@ function redactSecrets(output) {
 }
 function containsSecrets(output) {
   const capped = capInput(output);
-  return SECRET_PATTERNS.some((pattern) => {
-    pattern.lastIndex = 0;
-    return pattern.test(capped);
-  });
+  return SECRET_PATTERNS.some((pattern) => pattern.test(capped));
 }
 function checkSecretExposureInContent(content) {
   if (containsSecrets(content)) {
@@ -1504,8 +1502,8 @@ function pebkacDefenseExtension(pi) {
       if (c.type !== "text") return c;
       let text = c.text;
       text = guardOutputLength(text);
-      // Secrets redaction (wired to config)
-      if (loadedConfig.secretsIsolation && containsSecrets(text)) { text = redactSecrets(text); modified = true; }
+      // Secrets redaction — single pass (no separate containsSecrets check)
+      if (loadedConfig.secretsIsolation) { const redacted = redactSecrets(text); if (redacted !== text) { text = redacted; modified = true; } }
       if (enforcer) {
         if (enforcer.hasSubstantiveEvidence(text)) {
           const dedup = checkEvidenceDuplicate(event.toolName, text.slice(0, 500));
@@ -1547,7 +1545,7 @@ function pebkacDefenseExtension(pi) {
           modified = true;
         }
       }
-      return { ...c, text };
+      return modified ? { ...c, text } : c;
     });
     const summaryText = newContent.filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
     const status = event.isError ? "error" : "success";

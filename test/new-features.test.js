@@ -1524,3 +1524,150 @@ describe("Hardening: resetAllState restores config defaults", () => {
     }
   });
 });
+
+// ============================================================
+// Regression tests for correctness/perf hardening batch
+// ============================================================
+
+describe("Perf: single-pass secrets redaction in tool_result", () => {
+  test("secrets redacted without separate containsSecrets call", async () => {
+    const cwd = tempRoot();
+    try {
+      writeConfig(cwd, `version: "1.0"\ndefaults:\n  secrets_isolation: true\n`);
+      writePreferences(cwd, { theme: "standard", telemetry: true, notifications: true, healthChecks: true });
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi.events["turn_start"]({}, {});
+      const result = await pi.events["tool_result"]({
+        content: [{ type: "text", text: "aws key: AKIAIOSFODNN7EXAMPLE" }],
+        isError: false, toolName: "bash", toolCallId: "test-secret-1",
+      }, {});
+      const text = result?.content?.[0]?.text ?? "";
+      expect(text).toContain("[REDACTED]");
+      expect(text).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+
+  test("non-secret content passes through unchanged", async () => {
+    const cwd = tempRoot();
+    try {
+      writeConfig(cwd, `version: "1.0"\ndefaults:\n  secrets_isolation: true\n`);
+      writePreferences(cwd, { theme: "standard", telemetry: true, notifications: true, healthChecks: true });
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi.events["turn_start"]({}, {});
+      const result = await pi.events["tool_result"]({
+        content: [{ type: "text", text: "Build completed. Output written to disk." }],
+        isError: false, toolName: "bash", toolCallId: "test-nosecret-1",
+      }, {});
+      // Content should not be modified by secrets scan (no secrets present)
+      const text = result?.content?.[0]?.text ?? "Build completed. Output written to disk.";
+      expect(text).toContain("Build completed");
+      // No content array returned if unmodified (only details returned)
+      expect(result?.content).toBeUndefined();
+    } finally {
+      cleanup(cwd);
+    }
+  });
+});
+
+describe("Perf: no unnecessary content spread when text unchanged", () => {
+  test("unmodified content items are not spread-copied", async () => {
+    const cwd = tempRoot();
+    try {
+      writeConfig(cwd, `version: "1.0"\ndefaults:\n  verbosity: "quiet"\n`);
+      writePreferences(cwd, { theme: "standard", telemetry: true, notifications: true, healthChecks: true });
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi.events["turn_start"]({}, {});
+      const originalContent = [{ type: "text", text: "Simple output with no secrets or issues." }];
+      const result = await pi.events["tool_result"]({
+        content: originalContent,
+        isError: false, toolName: "bash", toolCallId: "test-nospread-1",
+      }, {});
+      // When text is unchanged, content should not be in result (only details)
+      expect(result?.content).toBeUndefined();
+      expect(result?.details).toBeDefined();
+    } finally {
+      cleanup(cwd);
+    }
+  });
+});
+
+describe("Correctness: SECRET_PATTERNS no shared /g state", () => {
+  test("containsSecrets works correctly across multiple calls", async () => {
+    const cwd = tempRoot();
+    try {
+      writeConfig(cwd, `version: "1.0"\ndefaults:\n  secrets_isolation: true\n`);
+      writePreferences(cwd, { theme: "standard", telemetry: true, notifications: true, healthChecks: true });
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi.events["turn_start"]({}, {});
+      // First call: contains a secret
+      const r1 = await pi.events["tool_result"]({
+        content: [{ type: "text", text: "key=AKIAIOSFODNN7EXAMPLE" }],
+        isError: false, toolName: "bash", toolCallId: "test-gstate-1",
+      }, {});
+      expect(r1?.content?.[0]?.text).toContain("[REDACTED]");
+      // Second call: also contains a secret — should still detect it
+      const r2 = await pi.events["tool_result"]({
+        content: [{ type: "text", text: "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij" }],
+        isError: false, toolName: "bash", toolCallId: "test-gstate-2",
+      }, {});
+      expect(r2?.content?.[0]?.text).toContain("[REDACTED]");
+      expect(r2?.content?.[0]?.text).not.toContain("ghp_");
+    } finally {
+      cleanup(cwd);
+    }
+  });
+});
+
+describe("CLI: per-command help", () => {
+  test("help status shows status-specific usage", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "help", "status"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("pebkac status");
+    expect(stdout).toContain("--json");
+  });
+
+  test("help init shows init-specific usage", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "help", "init"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("--non-interactive");
+    expect(stdout).toContain("--cwd");
+  });
+
+  test("help with unknown command exits 1", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "help", "nonexistent"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    const stderr = new TextDecoder().decode(result.stderr);
+    expect(stderr).toContain("Unknown command");
+  });
+
+  test("help without command shows general usage", () => {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "./bin/pebkac.js", "help"],
+      cwd: process.cwd(),
+      stdout: "pipe", stderr: "pipe",
+    });
+    const stdout = new TextDecoder().decode(result.stdout);
+    expect(result.exitCode).toBe(0);
+    expect(stdout).toContain("Usage:");
+  });
+});
