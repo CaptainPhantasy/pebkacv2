@@ -142,7 +142,7 @@ defaults:
   git_guard: true
   checkpoint_interval: 10
   verbosity: "${verbosity}"
-  enabled: true
+  enabled: ${boolFromFlags("--enabled", "--no-enabled", true)}
 
 # Agent runtime configuration
 # Set to "omp", "claude", or "none" for standalone mode
@@ -424,15 +424,16 @@ function doctorCommand() {
     issues++;
   }
 
-  // Check 5: Runtime binary
-  const runtime = readAgentRuntime(targetCwd);
-  checks.runtime = { name: runtime, found: false, path: null };
-  if (runtime === "none") {
+  // Check 5: Runtime binary — check the CONFIGURED runtime, not just any on PATH
+  const configuredRuntime = readAgentRuntime(targetCwd);
+  checks.runtime = { configured: configuredRuntime, found: false, path: null };
+  if (configuredRuntime === "none") {
     checks.runtime.found = true;
   } else {
-    const runtimeInfo = detectRuntime();
-    checks.runtime = { name: runtimeInfo.name, found: runtimeInfo.found, path: runtimeInfo.path };
-    if (!runtimeInfo.found) issues++;
+    const result = spawnSync("which", [configuredRuntime], { encoding: "utf8" });
+    checks.runtime.found = result.status === 0 && !!result.stdout.trim();
+    checks.runtime.path = checks.runtime.found ? result.stdout.trim() : null;
+    if (!checks.runtime.found) issues++;
   }
 
   // Check 6: Checkpoints directory

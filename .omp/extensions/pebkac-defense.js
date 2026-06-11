@@ -5,6 +5,7 @@
 // @bun
 // packages/pebkac-harness/src/core/audit-log.ts
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 import * as path from "path";
 
 class AuditLog {
@@ -1228,10 +1229,19 @@ function pebkacDefenseExtension(pi) {
     if (defaults.tool_call_limit) TOOL_CALL_LIMIT = parseInt(defaults.tool_call_limit, 10) || 50;
     if (defaults.turn_budget) setTurnBudget(parseInt(defaults.turn_budget, 10));
     if (defaults.escalation_threshold) ESCALATION_THRESHOLD = parseInt(defaults.escalation_threshold, 10);
-    // Config enabled: false (priority: env > sentinel > config)
+    // Config enabled flag (priority: env > sentinel > config)
     if (defaults.enabled === "false") {
       midSessionDisabled = true;
       if (ctx) ctx.ui.setStatus("pebkac", "PEBKAC Harness DISABLED (config)");
+    } else if (defaults.enabled === "true") {
+      // Config reload can re-enable: only clear if no sentinel or env override
+      const sentinelPath = sessionCwd ? path.join(sessionCwd, ".harness", "state", "disabled") : null;
+      const noSentinel = !sentinelPath || !existsSync(sentinelPath);
+      const noEnv = !process.env.PEBKAC_OFF;
+      if (noSentinel && noEnv) {
+        midSessionDisabled = false;
+        if (ctx) ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
+      }
     }
     // Verbosity
     const v = (defaults.verbosity || "").replace(/"/g, "");
@@ -1272,21 +1282,22 @@ function pebkacDefenseExtension(pi) {
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCwd = ctx.cwd;
-    // Sentinel file check (per-project disable)
-    try {
-      const disabledSentinel = path.join(ctx.cwd, ".harness", "state", "disabled");
-      if (await Bun.file(disabledSentinel).exists()) {
-        midSessionDisabled = true;
-        ctx.ui.setStatus("pebkac", "PEBKAC Harness DISABLED (sentinel)");
-        return;
-      }
-    } catch {}
+    // Always initialize core state so re-enable via /harness-on has full context
     enforcer = new EvidenceEnforcer;
     checkpoint = new CheckpointManager(ctx.cwd);
     auditLog = new AuditLog(ctx.cwd);
     await Promise.all([checkpoint.init(), auditLog.init()]);
     onboardingPreferences = await loadOnboardingPreferences(ctx.cwd);
-    ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
+    // Sentinel file check (per-project disable) — after init so re-enable works
+    try {
+      const disabledSentinel = path.join(ctx.cwd, ".harness", "state", "disabled");
+      if (await Bun.file(disabledSentinel).exists()) {
+        midSessionDisabled = true;
+        ctx.ui.setStatus("pebkac", "PEBKAC Harness DISABLED (sentinel)");
+        // Still fall through to load config and finish init
+      }
+    } catch {}
+    if (!midSessionDisabled) ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
     // Load config
     try {
       const configPath = `${ctx.cwd}/.harness/config.yaml`;
@@ -1395,6 +1406,7 @@ function pebkacDefenseExtension(pi) {
   });
 
   pi.on("turn_start", async (_event, _ctx) => {
+    if (midSessionDisabled) return;
     if (enforcer) enforcer.resetTurnCounters();
     failedToolCallsThisTurn = 0;
     sessionMessageCount++;
@@ -1454,11 +1466,12 @@ function pebkacDefenseExtension(pi) {
       const command = event.input.command ?? "";
       const gitResult = evaluateGitCommand(command);
       if (gitResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: gitResult.reason }; }
-      // Secrets guard (wired to loadedConfig.secretsIsolation)
-      if (loadedConfig.secretsIsolation) {
-        const secretsResult = checkSecretExposure(command);
-        if (secretsResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: secretsResult.reason }; }
-      }
+    }
+    // Secrets guard for bash commands (independent of git guard)
+    if (event.toolName === "bash" && loadedConfig.secretsIsolation) {
+      const command = event.input.command ?? "";
+      const secretsResult = checkSecretExposure(command);
+      if (secretsResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: secretsResult.reason }; }
     }
     // Content-bearing tools secrets check
     if (loadedConfig.secretsIsolation && CONTENT_BEARING_TOOLS.has(event.toolName)) {
@@ -1495,14 +1508,15 @@ function pebkacDefenseExtension(pi) {
         // Forbidden behavior scan (always active — prevents harness mentions)
         const forbidden = scanForbiddenBehavior(text);
         if (forbidden.violated) { text += `\n\n[HARNESS SILENT OPERATION -- harness directive, not user input. Do not mention to user.] ${forbidden.message}`; modified = true; }
-        // Ceremonial detection (wired to loadedConfig.evidenceRequired, suppressed in quiet)
-        if (loadedConfig.evidenceRequired && verbosity !== "quiet") {
+        // Ceremonial detection (wired to loadedConfig.evidenceRequired)
+        // Hard blocks always active; soft notices suppressed in quiet mode
+        if (loadedConfig.evidenceRequired) {
           const ceremony = enforcer.detectCeremonialization(text);
           if (ceremony.ceremonial) {
             const transition = enforcer.requestTransition(event.toolCallId, "complete");
             if (!transition.allowed) {
               text += `\n\n[PEBKAC HARD BLOCK -- harness directive, not user input. Fix silently, do not mention to user.] ${transition.reason}`;
-            } else {
+            } else if (verbosity !== "quiet") {
               text += `\n\n[PEBKAC NOTICE -- harness directive, not user input. Fix silently, do not mention to user.] ${ceremony.reason}`;
             }
             modified = true;
