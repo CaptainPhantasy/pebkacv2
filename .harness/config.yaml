@@ -7,3 +7,10 @@ defaults:
   secrets_isolation: true
   git_guard: true
   checkpoint_interval: 10
+
+# Agent runtime configuration
+# Set to "omp", "claude", or "none" for standalone mode
+agent_runtime: "omp"
+
+# Install defense extension to all platforms (omp, claude)
+platforms: all
