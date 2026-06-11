@@ -988,8 +988,10 @@ var toolCallsThisTurn = 0;
 function resetAllState() {
   breaker.reset();
   toolCallsThisTurn = 0;
+  TOOL_CALL_LIMIT = 50;
   recentToolCalls = [];
   consecutiveBlocks = 0;
+  ESCALATION_THRESHOLD = 5;
   turnsConsumed = 0;
   turnBudget = null;
   BLOCKED_TOOLS.clear();
@@ -1187,6 +1189,7 @@ var CONTENT_BEARING_TOOLS = new Set(["write", "edit", "notebook"]);
 function pebkacDefenseExtension(pi) {
   // PEBKAC_OFF env var — synchronous early exit
   if (process.env.PEBKAC_OFF === "1" || process.env.PEBKAC_OFF === "true") {
+    console.warn("[PEBKAC] Harness DISABLED via PEBKAC_OFF environment variable. No guards active this session.");
     pi.setLabel("PEBKAC Harness [DISABLED via PEBKAC_OFF]");
     return;
   }
@@ -1194,7 +1197,6 @@ function pebkacDefenseExtension(pi) {
   let enforcer;
   let checkpoint;
   let auditLog;
-  const breaker = new CircuitBreaker;
   let realityProfile;
   let turnsWithoutEvidence = 0;
   let compactionsSinceCheckpoint = 0;
@@ -1224,11 +1226,20 @@ function pebkacDefenseExtension(pi) {
   function applyDefaults(defaults, ctx) {
     if (defaults.checkpoint_interval) {
       const interval = parseInt(defaults.checkpoint_interval, 10);
-      if (!isNaN(interval) && interval > 0 && checkpoint) checkpoint.setCheckpointInterval(interval);
+      if (!isNaN(interval) && interval > 0 && interval <= 1000 && checkpoint) checkpoint.setCheckpointInterval(interval);
     }
-    if (defaults.tool_call_limit) TOOL_CALL_LIMIT = parseInt(defaults.tool_call_limit, 10) || 50;
-    if (defaults.turn_budget) setTurnBudget(parseInt(defaults.turn_budget, 10));
-    if (defaults.escalation_threshold) ESCALATION_THRESHOLD = parseInt(defaults.escalation_threshold, 10);
+    if (defaults.tool_call_limit) {
+      const parsed = parseInt(defaults.tool_call_limit, 10);
+      if (parsed && parsed >= 1 && parsed <= 500) TOOL_CALL_LIMIT = parsed;
+    }
+    if (defaults.turn_budget) {
+      const parsed = parseInt(defaults.turn_budget, 10);
+      if (parsed && parsed >= 1 && parsed <= 10000) setTurnBudget(parsed);
+    }
+    if (defaults.escalation_threshold) {
+      const parsed = parseInt(defaults.escalation_threshold, 10);
+      if (parsed && parsed >= 1 && parsed <= 100) ESCALATION_THRESHOLD = parsed;
+    }
     // Config enabled flag (priority: env > sentinel > config)
     if (defaults.enabled === "false") {
       midSessionDisabled = true;

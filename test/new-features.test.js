@@ -4,7 +4,7 @@ import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
-import pebkacDefenseExtension from "../.omp/extensions/pebkac-defense.js";
+import pebkacDefenseExtension, { resetAllState } from "../.omp/extensions/pebkac-defense.js";
 
 function tempRoot() {
   return join(tmpdir(), `pebkac-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -1337,5 +1337,190 @@ describe("Audit: unknown CLI flags produce warning", () => {
       const output = result.stdout + result.stderr;
       expect(output).toMatch(/Unknown flag.*--typo-flag/);
     } finally { cleanup(cwd); }
+  });
+});
+
+
+// ============================================================
+// Regression tests for security/correctness hardening batch
+// ============================================================
+
+describe("Hardening: PEBKAC_OFF produces console.warn", () => {
+  test("warns to stderr when PEBKAC_OFF=1", () => {
+    const saved = process.env.PEBKAC_OFF;
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    try {
+      process.env.PEBKAC_OFF = "1";
+      const pi = { setLabel: () => {}, on: () => {}, registerCommand: () => {}, sendMessage: () => {} };
+      pebkacDefenseExtension(pi);
+      expect(warnings.length).toBeGreaterThan(0);
+      expect(warnings[0]).toContain("PEBKAC_OFF");
+    } finally {
+      process.env.PEBKAC_OFF = saved;
+      console.warn = origWarn;
+      resetAllState();
+    }
+  });
+});
+
+describe("Hardening: dual CircuitBreaker unified", () => {
+  test("resetAllState resets the breaker used by extension hooks", async () => {
+    resetAllState();
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      // Build turnsWithoutEvidence > 3: need 4+ turn cycles without evidence (score +0.4)
+      for (let i = 0; i < 4; i++) {
+        await pi.events["turn_start"]({}, {});
+        await pi.events["turn_end"]({}, {});
+      }
+      // 5th turn: add failedToolCalls > 5 (+0.2) and compaction (+0.1) to reach score 0.7
+      await pi.events["turn_start"]({}, {});
+      // 10 identical tool calls → repeat detector blocks calls 4-10 (7 blocked)
+      const input = { command: "echo repeat-test-action" };
+      for (let i = 0; i < 10; i++) {
+        await pi.events["tool_call"]({ toolName: "bash", input }, {});
+      }
+      // Fire session_compact to increment compactionsSinceCheckpoint
+      await pi.events["session_compact"]({}, {});
+      // turn_end should compute score >= 0.7 and trip breaker
+      await pi.events["turn_end"]({}, {});
+      // Verify breaker is open
+      const result = await pi.events["tool_call"]({ toolName: "bash", input: { command: "echo verify" } }, {});
+      expect(result?.block).toBe(true);
+      // Blocked by escalation (from accumulated blocks) or breaker — either proves degradation triggered
+      expect(result?.reason).toMatch(/Circuit|BREAKER|ESCALATION/i);
+      // resetAllState should clear the module-level breaker (now the ONLY breaker)
+      resetAllState();
+      const pi2 = makePi(cwd);
+      await pi2.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi2.events["turn_start"]({}, {});
+      // Breaker should be closed — tool_call should NOT be blocked by breaker
+      const result2 = await pi2.events["tool_call"]({ toolName: "bash", input: { command: "echo fresh" } }, {});
+      if (result2?.block) {
+        expect(result2.reason).not.toMatch(/Circuit|BREAKER/i);
+      }
+    } finally {
+      cleanup(cwd);
+      resetAllState();
+    }
+  });
+});
+
+describe("Hardening: config values clamped to safe ranges", () => {
+  test("tool_call_limit clamped to 1-500", async () => {
+    resetAllState();
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, "defaults:\n  tool_call_limit: 99999\n");
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      // Should NOT accept 99999 — should stay at default 50
+      // Verify by making 51 calls — 51st should be blocked (default limit 50)
+      await pi.events["turn_start"]({}, {});
+      let blocked = false;
+      for (let i = 0; i < 55; i++) {
+        const r = await pi.events["tool_call"]({ toolName: "bash", input: { command: `echo ${i}` } }, {});
+        if (r?.block && r.reason?.includes("RATE LIMIT")) { blocked = true; break; }
+      }
+      expect(blocked).toBe(true);
+    } finally {
+      cleanup(cwd);
+      resetAllState();
+    }
+  });
+
+  test("tool_call_limit accepts valid value 200", async () => {
+    resetAllState();
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, "defaults:\n  tool_call_limit: 200\n");
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      await pi.events["turn_start"]({}, {});
+      // 55 calls should all pass with limit 200
+      let blocked = false;
+      for (let i = 0; i < 55; i++) {
+        const r = await pi.events["tool_call"]({ toolName: "bash", input: { command: `echo ${i}` } }, {});
+        if (r?.block && r.reason?.includes("RATE LIMIT")) { blocked = true; break; }
+      }
+      expect(blocked).toBe(false);
+    } finally {
+      cleanup(cwd);
+      resetAllState();
+    }
+  });
+
+  test("escalation_threshold clamped to 1-100", async () => {
+    resetAllState();
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, "defaults:\n  escalation_threshold: 99999\n");
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      // With default threshold (5), escalation should trigger after 5 blocks
+      await pi.events["turn_start"]({}, {});
+      // Trigger 6 blocks
+      for (let i = 0; i < 6; i++) {
+        const r = await pi.events["tool_call"]({ toolName: "bash", input: { command: `echo ${i}` } }, {});
+        if (r?.block) { /* count as block */ }
+      }
+      // After 5+ blocks, escalation should trigger (default threshold 5)
+      const r = await pi.events["tool_call"]({ toolName: "bash", input: { command: "echo test" } }, {});
+      // Escalation should have triggered since 99999 was rejected
+      // (it stays at default 5, so after 5 blocks escalation kicks in)
+      expect(r?.block).toBe(true);
+    } finally {
+      cleanup(cwd);
+      resetAllState();
+    }
+  });
+});
+
+describe("Hardening: resetAllState restores config defaults", () => {
+  test("TOOL_CALL_LIMIT restored to 50 after config override", async () => {
+    resetAllState();
+    const cwd = tempRoot();
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
+      writeConfig(cwd, "defaults:\n  tool_call_limit: 200\n");
+      const pi = makePi(cwd);
+      await pi.events["session_start"]({}, { cwd, ui: { setStatus: () => {} } });
+      // Config set TOOL_CALL_LIMIT to 200
+      resetAllState();
+      // Use a NEW cwd without config so TOOL_CALL_LIMIT stays at 50 after reset
+      const cwd2 = tempRoot();
+      try {
+        mkdirSync(join(cwd2, ".harness", "state"), { recursive: true });
+        mkdirSync(join(cwd2, ".harness", "checkpoints"), { recursive: true });
+        const pi2 = makePi(cwd2);
+        await pi2.events["session_start"]({}, { cwd: cwd2, ui: { setStatus: () => {} } });
+        await pi2.events["turn_start"]({}, {});
+        // 51 calls should trigger rate limit (default 50 restored by resetAllState)
+        let blocked = false;
+        for (let i = 0; i < 55; i++) {
+          const r = await pi2.events["tool_call"]({ toolName: "bash", input: { command: `echo ${i}` } }, {});
+          if (r?.block && r.reason?.includes("RATE LIMIT")) { blocked = true; break; }
+        }
+        expect(blocked).toBe(true);
+      } finally {
+        cleanup(cwd2);
+      }
+    } finally {
+      cleanup(cwd);
+      resetAllState();
+    }
   });
 });
