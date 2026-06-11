@@ -12,9 +12,3 @@
 #     expiry: "1h"
 
 secrets: {}
-
-# Test Secret (added during vault walkthrough)
-secrets:
-  - name: TEST_API_KEY
-    value: test-secret-1775189088297-n7da90
-    scope: [test]
