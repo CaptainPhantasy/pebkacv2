@@ -2,6 +2,55 @@
 
 All notable changes to the PEBKAC defense extension.
 
+## [0.3.0] — 2026-06-10
+
+### Added
+
+**Disable toggle (3 mechanisms)**
+
+- `PEBKAC_OFF=1` / `PEBKAC_OFF=true` environment variable — synchronous early exit at extension load, zero hooks registered
+- `pebkac off` / `pebkac on` CLI commands — write/remove `.harness/state/disabled` sentinel file for per-project disable
+- `enabled: false` in `.harness/config.yaml` — per-project disable via config (priority: env var > sentinel > config)
+- `/harness-off` and `/harness-on` slash commands — mid-session toggle, sets module-level flag all hooks check
+
+**Real verbosity system (full/normal/quiet)**
+
+- `verbosity: full` — current behavior (all blocks, notices, grounding warnings, context reminders, full contract)
+- `verbosity: normal` — blocks and warnings remain; suppresses context reminders unless breaker open or budget low; abbreviated contract
+- `verbosity: quiet` — only hard blocks (git guard, secrets, circuit breaker); no grounding warnings, no context reminders, no ceremony detection, minimal contract
+- Backward compat: `theme: "minimal"` maps to `verbosity: "normal"`
+
+**Wired config flags (previously theatre)**
+
+- `loadedConfig.gitGuard === false` skips git guard in tool_call
+- `loadedConfig.secretsIsolation === false` skips secrets exposure check and redaction
+- `loadedConfig.evidenceRequired === false` skips ceremonial detection in tool_result
+
+**Real onboarding**
+
+- `healthChecks` preference now gates `session-health.json` write and status output health section
+- `capturedAt` uses real timestamp instead of epoch
+- `verbosity` and `enabled` keys added to onboarding preferences and config.yaml template
+- CLI flags: `--verbosity`, `--enabled`/`--no-enabled`, `--theme` (backward compat)
+
+**CLI commands**
+
+- `pebkac launch --dry-run` — shows what harness runtime would be started
+- `pebkac doctor` — diagnoses setup issues (extension present, config valid, runtime binary found, sentinel files)
+- `pebkac status` — rich diagnostic output with extension size, config details, checkpoint count, audit log, runtime availability, session reports
+- `pebkac off` / `pebkac on` — per-project disable via sentinel file
+
+**Extension features**
+
+- Runtime health check: writes `.harness/state/session-health.json` at session start
+- Session report: writes `.harness/state/session-report.md` on budget exhaustion or `/harness-report`; next session gets recovery prompt with previous report summary
+- Config hot-reload: `fs.watch` on config.yaml (best-effort on USB mounts) + `/harness-reload` command for manual reload
+
+**Tests**
+
+- 21 new tests covering disable toggle, verbosity, config flags, mid-session toggle, session report, health check, config reload, CLI off/on, launch, doctor, and status commands
+- Total: 63 tests passing across 10 files
+
 ## [0.2.0] — 2025-05-08
 
 ### Added

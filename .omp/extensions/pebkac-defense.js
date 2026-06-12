@@ -5,6 +5,7 @@
 // @bun
 // packages/pebkac-harness/src/core/audit-log.ts
 import * as fs from "fs/promises";
+import { existsSync } from "fs";
 import * as path from "path";
 
 class AuditLog {
@@ -97,15 +98,22 @@ class CheckpointManager {
   setCurrentTask(task) {
     this.#state.currentTask = task;
   }
+  setItemStatus(itemId, status) {
+    this.#state.itemStatuses[itemId] = status;
+  }
   addEvidenceSummary(entry) {
     this.#state.evidenceSummary.push(entry);
     if (this.#state.evidenceSummary.length > CONFIG.EVIDENCE_SUMMARY_MAX) {
       this.#state.evidenceSummary = this.#state.evidenceSummary.slice(-CONFIG.EVIDENCE_SUMMARY_MAX);
     }
   }
+  #checkpointInterval = 10;
+  setCheckpointInterval(n) {
+    this.#checkpointInterval = n;
+  }
   tick() {
     this.#turnCount++;
-    return this.#turnCount % CONFIG.CHECKPOINT_SAVE_INTERVAL === 0;
+    return this.#turnCount % this.#checkpointInterval === 0;
   }
   async save() {
     this.#state.savedAt = Date.now();
@@ -197,6 +205,10 @@ ${this.#state.currentTask}`);
 class CircuitBreaker {
   #state = "closed";
   #openReason = "";
+  reset() {
+    this.#state = "closed";
+    this.#openReason = "";
+  }
   trip(reason) {
     if (this.#state === "closed") {
       this.#state = "open";
@@ -846,21 +858,23 @@ var SECRET_EXPOSURE_COMMANDS = [
   /echo\s+\$\{?\w*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\w*\}?/i
 ];
 var SECRET_PATTERNS = [
-  /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-  /(?<=AWS_SECRET_ACCESS_KEY\s*=\s*)[A-Za-z0-9/+=]{40}/g,
-  /(?<=(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY)\s*=\s*["']?)[A-Za-z0-9_\-./+=]{20,}/gi,
-  /(?<=Bearer\s+)[A-Za-z0-9_\-./+=]{20,}/g,
-  /(?<=:\/\/\w+:)[^@]+(?=@)/g,
-  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
-  /gh[pousr]_[A-Za-z0-9_]{36,}/g,
-  /sk_(?:live|test)_[A-Za-z0-9]{24,}/g,
-  /xox[bpoas]-[A-Za-z0-9-]+/g
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /(?<=AWS_SECRET_ACCESS_KEY\s*=\s*)[A-Za-z0-9/+=]{40}/,
+  /(?<=(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|PRIVATE_KEY)\s*=\s*["']?)[A-Za-z0-9_\-./+=]{20,}/i,
+  /(?<=Bearer\s+)[A-Za-z0-9_\-./+=]{20,}/,
+  /(?<=:\/\/\w+:)[^@]+(?=@)/,
+  /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA )?PRIVATE KEY-----/,
+  /gh[pousr]_[A-Za-z0-9_]{36,}/,
+  /sk_(?:live|test)_[A-Za-z0-9]{24,}/,
+  /xox[bpoas]-[A-Za-z0-9-]+/
 ];
 function capInput(input) {
   return input.length > CONFIG.SECRET_SCAN_MAX_LENGTH ? input.slice(0, CONFIG.SECRET_SCAN_MAX_LENGTH) : input;
 }
 function checkSecretExposure(command) {
-  const capped = capInput(command);
+  // Strip git commit message payload — it's not a command vector for secret exposure
+  const scanTarget = command.replace(/\bgit\s+commit\s+-m\s+["']?/, "git commit ");
+  const capped = capInput(scanTarget);
   for (const pattern of SECRET_EXPOSURE_COMMANDS) {
     if (pattern.test(capped)) {
       return {
@@ -874,8 +888,9 @@ function checkSecretExposure(command) {
 function redactSecrets(output) {
   let sanitized = capInput(output);
   for (const pattern of SECRET_PATTERNS) {
-    pattern.lastIndex = 0;
-    sanitized = sanitized.replace(pattern, "[REDACTED]");
+    // Create global copy for multi-match replacement
+    const globalPattern = new RegExp(pattern.source, pattern.flags.includes("i") ? "gi" : "g");
+    sanitized = sanitized.replace(globalPattern, "[REDACTED]");
   }
   if (output.length > CONFIG.SECRET_SCAN_MAX_LENGTH) {
     sanitized += output.slice(CONFIG.SECRET_SCAN_MAX_LENGTH);
@@ -884,10 +899,7 @@ function redactSecrets(output) {
 }
 function containsSecrets(output) {
   const capped = capInput(output);
-  return SECRET_PATTERNS.some((pattern) => {
-    pattern.lastIndex = 0;
-    return pattern.test(capped);
-  });
+  return SECRET_PATTERNS.some((pattern) => pattern.test(capped));
 }
 function checkSecretExposureInContent(content) {
   if (containsSecrets(content)) {
@@ -929,14 +941,52 @@ function serializeHandoff(handoff) {
 `);
 }
 function parseSubagentResult(output, durationMs) {
-  const hasEvidence = /\d+\s+pass/i.test(output) || /exit\s*code:?\s*0/i.test(output);
-  return {
-    status: hasEvidence ? "complete" : "blocked",
+  const result = {
+    status: "blocked",
     evidence: [],
     checkpointUpdates: {},
+    changedFiles: [],
+    blockers: [],
     output,
     durationMs
   };
+  // Try structured JSON parse first
+  try {
+    const parsed = JSON.parse(output);
+    if (parsed && typeof parsed === "object") {
+      result.status = parsed.status === "complete" ? "complete" : "blocked";
+      if (Array.isArray(parsed.evidence)) {
+        result.evidence = parsed.evidence.map((e) => {
+          if (typeof e === "string") return { description: e, verified: true };
+          return { description: e.description ?? "", type: e.type ?? "command_output", verified: e.verified !== false };
+        });
+      }
+      if (parsed.checkpointUpdates && typeof parsed.checkpointUpdates === "object") {
+        result.checkpointUpdates = parsed.checkpointUpdates;
+      }
+      if (Array.isArray(parsed.changedFiles)) result.changedFiles = parsed.changedFiles;
+      if (Array.isArray(parsed.blockers)) result.blockers = parsed.blockers;
+      if (parsed.blockerReason && typeof parsed.blockerReason === "string") result.blockers.push(parsed.blockerReason);
+      return result;
+    }
+  } catch {}
+  // Fallback: heuristic parsing from text output
+  const hasTestEvidence = /\d+\s+pass/i.test(output) || /exit\s*code:?\s*0/i.test(output);
+  const hasDiffEvidence = /^[+-]\s/m.test(output) || /file_diff/i.test(output);
+  const evidenceItems = [];
+  if (hasTestEvidence) evidenceItems.push({ description: "Test output detected", type: "test_result", verified: true });
+  if (hasDiffEvidence) evidenceItems.push({ description: "File diff detected", type: "file_diff", verified: true });
+  // Extract changed files from output
+  const fileMatches = output.matchAll(/(?:\/[\w\-./]+\.\w+)/g);
+  for (const m of fileMatches) result.changedFiles.push(m[0]);
+  // Extract blockers
+  const blockerMatch = output.match(/BLOCKED:\s*(.+)/i);
+  if (blockerMatch) result.blockers.push(blockerMatch[1].trim());
+  if (evidenceItems.length > 0 && result.blockers.length === 0) {
+    result.status = "complete";
+    result.evidence = evidenceItems;
+  }
+  return result;
 }
 
 // packages/pebkac-harness/src/core/rate-limiter.ts
@@ -957,10 +1007,24 @@ var CONFIG = {
 };
 
 var toolCallsThisTurn = 0;
+/** Reset all module-level state — for test isolation only */
+function resetAllState() {
+  breaker.reset();
+  toolCallsThisTurn = 0;
+  TOOL_CALL_LIMIT = 50;
+  recentToolCalls = [];
+  consecutiveBlocks = 0;
+  ESCALATION_THRESHOLD = 5;
+  turnsConsumed = 0;
+  turnBudget = null;
+  BLOCKED_TOOLS.clear();
+  ALLOWED_TOOLS = null;
+  evidenceHashes.clear();
+}
 function checkRateLimit() {
   toolCallsThisTurn++;
-  if (toolCallsThisTurn >= CONFIG.RATE_LIMIT_TOOL_CALLS) {
-    return { blocked: true, reason: `[HARNESS RATE LIMIT] ${toolCallsThisTurn} tool calls this turn. Limit: ${CONFIG.RATE_LIMIT_TOOL_CALLS}. Stop retrying and produce evidence or report BLOCKED.` };
+  if (toolCallsThisTurn > TOOL_CALL_LIMIT) {
+    return { blocked: true, reason: `[HARNESS RATE LIMIT] ${toolCallsThisTurn} tool calls this turn. Limit: ${TOOL_CALL_LIMIT}. Stop retrying and produce evidence or report BLOCKED.` };
   }
   return { blocked: false };
 }
@@ -1051,6 +1115,9 @@ function checkToolAllowlist(toolName) {
 // packages/pebkac-harness/src/core/evidence-dedup.ts
 var MAX_EVIDENCE_HASHES = 500;
 var evidenceHashes = new Set();
+var CONTENT_BEARING_TOOLS = new Set(["write", "edit", "notebook"]);
+// Module-level breaker — resetAllState() needs to reach it for test isolation
+const breaker = new CircuitBreaker;
 function hashEvidence(toolName, snippet) {
   // Simple hash: tool name + first 200 chars of normalized output
   const normalized = snippet.slice(0, 200).replace(/\s+/g, ' ').trim();
@@ -1117,14 +1184,50 @@ function buildSessionSummary(enforcer2, checkpoint2, turnCount, breakerState) {
   parts.push(`**Circuit breaker:** ${breakerState}`);
   return parts.join('\n');
 }
+const DEFAULT_ONBOARDING_PREFERENCES = Object.freeze({
+  theme: "standard",
+  telemetry: true,
+  notifications: true,
+  healthChecks: true
+});
+async function loadOnboardingPreferences(cwd) {
+  const prefs = { ...DEFAULT_ONBOARDING_PREFERENCES };
+  try {
+    const loaded = await Bun.file(path.join(cwd, ".harness", "state", "onboarding-preferences.json")).json();
+    if (typeof loaded.theme === "string" && loaded.theme.length > 0) prefs.theme = loaded.theme;
+    if (typeof loaded.telemetry === "boolean") prefs.telemetry = loaded.telemetry;
+    if (typeof loaded.notifications === "boolean") prefs.notifications = loaded.notifications;
+    if (typeof loaded.healthChecks === "boolean") prefs.healthChecks = loaded.healthChecks;
+  } catch {}
+  try {
+    const consent = await Bun.file(path.join(cwd, ".harness", "state", "telemetry-consent.json")).json();
+    if (typeof consent.enabled === "boolean") prefs.telemetry = consent.enabled;
+  } catch {}
+  return prefs;
+}
+function notify(ctx, prefs, message, level = "info") {
+  if (prefs.notifications || level === "warning" || level === "error") {
+    ctx.ui.notify(message, level);
+  }
+}
+async function appendAudit(auditLog, prefs, record) {
+  if (prefs.telemetry) {
+    await auditLog.append(record);
+  }
+}
 // packages/pebkac-harness/src/core/index.ts
 var CONTENT_BEARING_TOOLS = new Set(["write", "edit", "notebook"]);
 function pebkacDefenseExtension(pi) {
+  // PEBKAC_OFF env var — synchronous early exit
+  if (process.env.PEBKAC_OFF === "1" || process.env.PEBKAC_OFF === "true") {
+    console.warn("[PEBKAC] Harness DISABLED via PEBKAC_OFF environment variable. No guards active this session.");
+    pi.setLabel("PEBKAC Harness [DISABLED via PEBKAC_OFF]");
+    return;
+  }
   pi.setLabel("PEBKAC Harness [L1-L4]");
   let enforcer;
   let checkpoint;
   let auditLog;
-  const breaker = new CircuitBreaker;
   let realityProfile;
   let turnsWithoutEvidence = 0;
   let compactionsSinceCheckpoint = 0;
@@ -1132,89 +1235,221 @@ function pebkacDefenseExtension(pi) {
   let sessionMessageCount = 0;
   let hasFlarePlan = false;
   let currentPhase;
+  let midSessionDisabled = false;
+  let verbosity = "full";
+  let loadedConfig = { evidenceRequired: true, deterministicPrompting: true, secretsIsolation: true, gitGuard: true };
+  let onboardingPreferences = { ...DEFAULT_ONBOARDING_PREFERENCES };
+  let configWatcher = null;
+  let sessionCwd = null;
+
+  // --- Config parsing helpers (shared between initial load and hot-reload) ---
+  function parseConfigYaml(configText) {
+    const defaults = {};
+    const defaultsMatch = configText.match(/defaults:\s*\n([\s\S]*?)(?:\n\S|\n*$)/);
+    if (defaultsMatch) {
+      for (const line of defaultsMatch[1].split("\n")) {
+        const kv = line.match(/^\s+(\w+):\s*(.+)/);
+        if (kv) defaults[kv[1]] = kv[2].trim();
+      }
+    }
+    return defaults;
+  }
+  function applyDefaults(defaults, ctx) {
+    if (defaults.checkpoint_interval) {
+      const interval = parseInt(defaults.checkpoint_interval, 10);
+      if (!isNaN(interval) && interval > 0 && interval <= 1000 && checkpoint) checkpoint.setCheckpointInterval(interval);
+    }
+    if (defaults.tool_call_limit) {
+      const parsed = parseInt(defaults.tool_call_limit, 10);
+      if (parsed && parsed >= 1 && parsed <= 500) TOOL_CALL_LIMIT = parsed;
+    }
+    if (defaults.turn_budget) {
+      const parsed = parseInt(defaults.turn_budget, 10);
+      if (parsed && parsed >= 1 && parsed <= 10000) setTurnBudget(parsed);
+    }
+    if (defaults.escalation_threshold) {
+      const parsed = parseInt(defaults.escalation_threshold, 10);
+      if (parsed && parsed >= 1 && parsed <= 100) ESCALATION_THRESHOLD = parsed;
+    }
+    // Config enabled flag (priority: env > sentinel > config)
+    if (defaults.enabled === "false") {
+      midSessionDisabled = true;
+      if (ctx) ctx.ui.setStatus("pebkac", "PEBKAC Harness DISABLED (config)");
+    } else if (defaults.enabled === "true") {
+      // Config reload can re-enable: only clear if no sentinel or env override
+      const sentinelPath = sessionCwd ? path.join(sessionCwd, ".harness", "state", "disabled") : null;
+      const noSentinel = !sentinelPath || !existsSync(sentinelPath);
+      const noEnv = !process.env.PEBKAC_OFF;
+      if (noSentinel && noEnv) {
+        midSessionDisabled = false;
+        if (ctx) ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
+      }
+    }
+    // Verbosity
+    const v = (defaults.verbosity || "").replace(/"/g, "");
+    if (["full", "normal", "quiet"].includes(v)) {
+      verbosity = v;
+    } else if (onboardingPreferences.theme === "minimal" || ["normal", "quiet"].includes(onboardingPreferences.verbosity)) {
+      verbosity = onboardingPreferences.verbosity || "normal";
+    }
+    // Wire existing config flags to actually gate guards
+    loadedConfig = {
+      evidenceRequired: defaults.evidence_required !== "false",
+      deterministicPrompting: defaults.deterministic_prompting !== "false",
+      secretsIsolation: defaults.secrets_isolation !== "false",
+      gitGuard: defaults.git_guard !== "false",
+    };
+  }
+
+  // --- Verbosity-gated notify ---
+  function gatedNotify(ctx, prefs, message, level = "info") {
+    // quiet: only errors; normal: warnings+errors; full: all
+    if (verbosity === "quiet" && level !== "error") return;
+    if (verbosity === "normal" && level === "info") return;
+    notify(ctx, prefs, message, level);
+  }
+
+  // --- Session report writer ---
+  async function writeSessionReport(reason) {
+    if (!sessionCwd || !checkpoint) return;
+    try {
+      const summary = buildSessionSummary(enforcer, checkpoint, sessionMessageCount, breaker.state);
+      const parts = [summary, "", `**Exit reason:** ${reason}`, `**Verbosity:** ${verbosity}`];
+      const reportPath = path.join(sessionCwd, ".harness", "state", "session-report.md");
+      await Bun.write(reportPath, parts.join("\n"));
+    } catch {}
+  }
+
+  // ==================== HOOKS ====================
+
   pi.on("session_start", async (_event, ctx) => {
+    sessionCwd = ctx.cwd;
+    // Always initialize core state so re-enable via /harness-on has full context
     enforcer = new EvidenceEnforcer;
     checkpoint = new CheckpointManager(ctx.cwd);
     auditLog = new AuditLog(ctx.cwd);
     await Promise.all([checkpoint.init(), auditLog.init()]);
-    ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
-    await auditLog.append({
-      timestamp: Date.now(),
-      event: "session_start",
-      details: { cwd: ctx.cwd }
-    });
-    let toolVersions;
+    onboardingPreferences = await loadOnboardingPreferences(ctx.cwd);
+    // Sentinel file check (per-project disable) — after init so re-enable works
     try {
-      const toolVersionsPath = `${ctx.cwd}/.harness/state/tool-versions.json`;
-      toolVersions = await Bun.file(toolVersionsPath).json();
+      const disabledSentinel = path.join(ctx.cwd, ".harness", "state", "disabled");
+      if (await Bun.file(disabledSentinel).exists()) {
+        midSessionDisabled = true;
+        ctx.ui.setStatus("pebkac", "PEBKAC Harness DISABLED (sentinel)");
+        // Still fall through to load config and finish init
+      }
+    } catch {}
+    if (!midSessionDisabled) ctx.ui.setStatus("pebkac", "PEBKAC Harness Active");
+    // Load config
+    try {
+      const configPath = `${ctx.cwd}/.harness/config.yaml`;
+      const configText = await Bun.file(configPath).text();
+      applyDefaults(parseConfigYaml(configText), ctx);
     } catch {
-      toolVersions = null;
+      loadedConfig = { evidenceRequired: true, deterministicPrompting: true, secretsIsolation: true, gitGuard: true };
     }
+    await appendAudit(auditLog, onboardingPreferences, {
+      timestamp: Date.now(), event: "session_start",
+      details: { cwd: ctx.cwd, verbosity, disabled: midSessionDisabled }
+    });
+    // Runtime health check
+    if (onboardingPreferences.healthChecks) {
+      try {
+        const healthPath = path.join(ctx.cwd, ".harness", "state", "session-health.json");
+        await Bun.write(healthPath, JSON.stringify({
+          startTime: new Date().toISOString(), extensionLoaded: true,
+          configValid: loadedConfig !== null, cwd: ctx.cwd, verbosity, disabled: midSessionDisabled
+        }, null, 2));
+      } catch {}
+    }
+    let toolVersions;
+    try { toolVersions = await Bun.file(`${ctx.cwd}/.harness/state/tool-versions.json`).json(); } catch { toolVersions = null; }
     realityProfile = await buildRealityProfile(toolVersions);
+    // Previous session report recovery
+    try {
+      const reportPath = path.join(ctx.cwd, ".harness", "state", "session-report.md");
+      if (await Bun.file(reportPath).exists()) {
+        const prev = await Bun.file(reportPath).text();
+        if (prev.length > 50) pi.sendMessage({ customType: "pebkac-recovery", content: `## Previous Session Report\n${prev.slice(0, 2000)}`, display: true, attribution: "agent" });
+      }
+    } catch {}
     const recovery = checkpoint.buildRecoveryInjection();
     if (recovery.includes("DO NOT RE-ATTEMPT") || recovery.includes("WORKING APPROACHES")) {
-      pi.sendMessage({
-        customType: "pebkac-recovery",
-        content: recovery,
-        display: true,
-        attribution: "agent"
-      });
+      pi.sendMessage({ customType: "pebkac-recovery", content: recovery, display: true, attribution: "agent" });
     }
+    // Config hot-reload (best-effort on USB mounts)
+    try {
+      const configPath = path.join(ctx.cwd, ".harness", "config.yaml");
+      const { watch } = await import("fs");
+      configWatcher = watch(configPath, () => {
+        Bun.file(configPath).text().then(text => {
+          applyDefaults(parseConfigYaml(text), null);
+          if (auditLog && onboardingPreferences.telemetry) auditLog.append({ timestamp: Date.now(), event: "config_reload", details: { verbosity } });
+        }).catch(() => {});
+      });
+    } catch {}
   });
+
   pi.on("before_agent_start", async (event, _ctx) => {
-    const contractLayer = buildContractSystemPromptLayer();
-    let fullPrompt = `${event.systemPrompt}
-
-${contractLayer}`;
+    if (midSessionDisabled) return;
+    // Verbosity-gated contract layer
+    let contractLayer;
+    if (verbosity === "quiet") {
+      contractLayer = "Evidence required for completion claims. Destructive git commands blocked.";
+    } else if (verbosity === "normal") {
+      const fb = DEFAULT_FORBIDDEN_BEHAVIORS.map((fb, i) => `${i+1}. ${fb.description}\n   CONSEQUENCE: ${fb.consequence}`).join("\n");
+      contractLayer = `## PEBKAC HARNESS\n\n### FORBIDDEN BEHAVIORS\nYou MUST NOT:\n${fb}\n\n### COMPLETENESS GATE\nBefore declaring done, produce a COMPLETENESS MATRIX with evidence for each item.`;
+    } else {
+      contractLayer = buildContractSystemPromptLayer();
+    }
+    let fullPrompt = `${event.systemPrompt}\n\n${contractLayer}`;
     if (realityProfile) {
-      fullPrompt += `
-
-${buildGroundingInjection(realityProfile)}`;
+      if (verbosity !== "quiet") {
+        fullPrompt += `\n\n${buildGroundingInjection(realityProfile)}`;
+      } else {
+        fullPrompt += `\n\nToday's date is ${realityProfile.currentDate}.`;
+      }
     }
     const taskDesc = event.taskDescription;
     if (taskDesc) {
       const compiled = compileContract(taskDesc);
       if (compiled) {
+        if (checkpoint) {
+          checkpoint.setCurrentTask(taskDesc);
+          for (const item of compiled.items) checkpoint.setItemStatus(item.id, "pending");
+          await checkpoint.save();
+        }
         const rules = compiled.items.map((item) => item.description);
         const conflicts = detectConflicts(rules);
         if (conflicts.hasConflicts && conflicts.resolution === "rejected") {
-          fullPrompt += `
-
-[PEBKAC] WARNING: Conflicting constraints detected in task. Review the contract carefully.`;
+          fullPrompt += `\n[PEBKAC] WARNING: Conflicting constraints detected in task.`;
         }
       }
     }
-    if (currentPhase === "planning" || sessionMessageCount < 4 && !hasFlarePlan) {
-      fullPrompt += `
-
-${buildFlarePlanningInjection()}`;
+    if (verbosity !== "quiet" && (currentPhase === "planning" || sessionMessageCount < 4 && !hasFlarePlan)) {
+      fullPrompt += `\n\n${buildFlarePlanningInjection()}`;
     }
     return { systemPrompt: fullPrompt };
   });
+
   pi.on("session_before_compact", async (_event, _ctx) => {
-    if (checkpoint) {
-      await checkpoint.save();
-    }
+    if (checkpoint) await checkpoint.save();
   });
+
   pi.on("session_compact", async (_event, _ctx) => {
     compactionsSinceCheckpoint++;
     if (checkpoint) {
       const recovery = checkpoint.buildRecoveryInjection();
       if (recovery.length > 100) {
-        pi.sendMessage({
-          customType: "pebkac-recovery",
-          content: recovery,
-          display: true,
-          attribution: "agent"
-        });
+        pi.sendMessage({ customType: "pebkac-recovery", content: recovery, display: true, attribution: "agent" });
         compactionsSinceCheckpoint = 0;
       }
     }
   });
+
   pi.on("turn_start", async (_event, _ctx) => {
-    if (enforcer) {
-      enforcer.resetTurnCounters();
-    }
+    if (midSessionDisabled) return;
+    if (enforcer) enforcer.resetTurnCounters();
     failedToolCallsThisTurn = 0;
     sessionMessageCount++;
     currentPhase = inferPhase(sessionMessageCount, hasFlarePlan);
@@ -1223,418 +1458,379 @@ ${buildFlarePlanningInjection()}`;
     resetEscalation();
     tickTurnBudget();
   });
+
   pi.on("turn_end", async (_event, _ctx) => {
-    if (checkpoint?.tick()) {
-      await checkpoint.save();
-    }
+    if (midSessionDisabled) return;
+    if (checkpoint?.tick()) await checkpoint.save();
     if (enforcer) {
-      if (enforcer.turnEvidenceCount === 0) {
-        turnsWithoutEvidence++;
-      } else {
-        turnsWithoutEvidence = 0;
-      }
-      const metrics = {
-        ceremonyRatio: enforcer.getCeremonyRatio(),
-        evidenceCount: enforcer.turnEvidenceCount,
-        failedToolCalls: failedToolCallsThisTurn,
-        turnsWithoutEvidence,
-        compactionsSinceCheckpoint
-      };
+      if (enforcer.turnEvidenceCount === 0) turnsWithoutEvidence++; else turnsWithoutEvidence = 0;
+      const metrics = { ceremonyRatio: enforcer.getCeremonyRatio(), evidenceCount: enforcer.turnEvidenceCount, failedToolCalls: failedToolCallsThisTurn, turnsWithoutEvidence, compactionsSinceCheckpoint };
       const degradation = scoreDegradation(metrics);
-      if (degradation.threshold) {
-        breaker.trip(degradation.reason ?? "Degradation threshold exceeded");
-      } else if (enforcer.turnEvidenceCount > 0) {
-        breaker.recordEvidence();
-      }
-      await auditLog.append({
-        timestamp: Date.now(),
-        event: "turn_end",
-        details: { metrics, breakerState: breaker.state }
-      });
+      if (degradation.threshold) breaker.trip(degradation.reason ?? "Degradation threshold exceeded");
+      else if (enforcer.turnEvidenceCount > 0) breaker.recordEvidence();
+      await appendAudit(auditLog, onboardingPreferences, { timestamp: Date.now(), event: "turn_end", details: { metrics, breakerState: breaker.state } });
     }
-    // Turn budget check
     const budget = checkTurnBudget();
     if (budget.exceeded && checkpoint) {
       const summary = buildSessionSummary(enforcer, checkpoint, sessionMessageCount, breaker.state);
-      await checkpoint.addEvidenceSummary(`[TURN BUDGET] ${sessionMessageCount} turns consumed`);
+      checkpoint.addEvidenceSummary(`[SESSION SUMMARY]\n${summary}`);
+      checkpoint.addEvidenceSummary(`[TURN BUDGET] ${sessionMessageCount} turns consumed`);
       await checkpoint.save();
+      await writeSessionReport("turn budget exceeded");
     }
   });
+
   pi.on("tool_call", async (event, _ctx) => {
+    if (midSessionDisabled) return;
     // Rate limiter
     const rateResult = checkRateLimit();
-    if (rateResult.blocked) {
-      failedToolCallsThisTurn++;
-      recordBlock();
-      return { block: true, reason: rateResult.reason };
-    }
+    if (rateResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: rateResult.reason }; }
     // Repeat action detector
     const repeatResult = checkRepeatAction(event.toolName, event.input);
-    if (repeatResult.blocked) {
-      failedToolCallsThisTurn++;
-      recordBlock();
-      return { block: true, reason: repeatResult.reason };
-    }
+    if (repeatResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: repeatResult.reason }; }
     // Escalation check
     const escalation = checkEscalation();
-    if (escalation.escalated) {
-      failedToolCallsThisTurn++;
-      return { block: true, reason: escalation.reason };
-    }
+    if (escalation.escalated) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: escalation.reason }; }
     // Tool allowlist/blocklist
     const toolPolicy = checkToolAllowlist(event.toolName);
-    if (toolPolicy.blocked) {
-      failedToolCallsThisTurn++;
-      return { block: true, reason: toolPolicy.reason };
+    if (toolPolicy.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: toolPolicy.reason }; }
+    // Circuit breaker
+    if (breaker.state === "half-open" && event.toolName !== "harness-status" && event.toolName !== "harness-audit" && event.toolName !== "harness-off" && event.toolName !== "harness-on") {
+      failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: "Circuit half-open: only retrieval commands are allowed until evidence is produced." };
     }
-    if (breaker.state === "half-open" && event.toolName !== "harness-status" && event.toolName !== "harness-audit") {
-      failedToolCallsThisTurn++;
-      return {
-        block: true,
-        reason: "Circuit half-open: only retrieval commands are allowed until evidence is produced."
-      };
-    }
-    if (breaker.isOpen) {
-      failedToolCallsThisTurn++;
-      return { block: true, reason: breaker.buildCorrectionMessage() };
-    }
+    if (breaker.isOpen) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: breaker.buildCorrectionMessage() }; }
+    // Lifecycle policy
     const effectivePhase = currentPhase ?? "implementation";
     const policyResult = checkToolPolicy(effectivePhase, event.toolName);
-    if (!policyResult.allowed) {
-      failedToolCallsThisTurn++;
-      return { block: true, reason: policyResult.reason };
-    }
-    if (event.toolName === "bash") {
+    if (!policyResult.allowed) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: policyResult.reason }; }
+    // Git guard (wired to loadedConfig.gitGuard)
+    if (event.toolName === "bash" && loadedConfig.gitGuard) {
       const command = event.input.command ?? "";
       const gitResult = evaluateGitCommand(command);
-      if (gitResult.blocked) {
-        failedToolCallsThisTurn++;
-        return { block: true, reason: gitResult.reason };
-      }
-      const secretsResult = checkSecretExposure(command);
-      if (secretsResult.blocked) {
-        failedToolCallsThisTurn++;
-        return { block: true, reason: secretsResult.reason };
-      }
+      if (gitResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: gitResult.reason }; }
     }
-    if (CONTENT_BEARING_TOOLS.has(event.toolName)) {
+    // Secrets guard for bash commands (independent of git guard)
+    if (event.toolName === "bash" && loadedConfig.secretsIsolation) {
+      const command = event.input.command ?? "";
+      const secretsResult = checkSecretExposure(command);
+      if (secretsResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: secretsResult.reason }; }
+    }
+    // Content-bearing tools secrets check
+    if (loadedConfig.secretsIsolation && CONTENT_BEARING_TOOLS.has(event.toolName)) {
       const input = event.input;
       const content = input.content ?? input.text ?? "";
       if (content) {
         const contentResult = checkSecretExposureInContent(content);
-        if (contentResult.blocked) {
-          failedToolCallsThisTurn++;
-          return { block: true, reason: contentResult.reason };
-        }
+        if (contentResult.blocked) { failedToolCallsThisTurn++; recordBlock(); return { block: true, reason: contentResult.reason }; }
       }
     }
   });
+
   pi.on("tool_result", async (event, _ctx) => {
+    if (midSessionDisabled) return;
     const content = event.content;
-    if (!content || content.length === 0)
-      return;
+    if (!content || content.length === 0) return;
     let modified = false;
     const newContent = content.map((c) => {
-      if (c.type !== "text")
-        return c;
+      if (c.type !== "text") return c;
       let text = c.text;
-      // Output length guard
       text = guardOutputLength(text);
-      if (containsSecrets(text)) {
-        modified = true;
-      }
+      // Secrets redaction — single pass (no separate containsSecrets check)
+      if (loadedConfig.secretsIsolation) { const redacted = redactSecrets(text); if (redacted !== text) { text = redacted; modified = true; } }
       if (enforcer) {
         if (enforcer.hasSubstantiveEvidence(text)) {
-          // Evidence dedup -- skip recording duplicate evidence
           const dedup = checkEvidenceDuplicate(event.toolName, text.slice(0, 500));
           if (!dedup.isDuplicate) {
-            enforcer.recordEvidence({
-              itemId: event.toolCallId,
-              actionDescription: `${event.toolName} tool result`,
-              evidenceSnippet: text.slice(0, 500),
-              verifier: event.toolName,
-              verified: !event.isError,
-              timestamp: Date.now(),
-              type: "command_output"
-            });
+            enforcer.recordEvidence({ itemId: event.toolCallId, actionDescription: `${event.toolName} tool result`, evidenceSnippet: text.slice(0, 500), verifier: event.toolName, verified: !event.isError, timestamp: Date.now(), type: "command_output" });
           }
-          if (checkpoint) {
-            checkpoint.addEvidenceSummary(`[${event.toolName}] ${text.slice(0, 100).replace(/\n/g, " ")}`);
-          }
+          if (checkpoint) checkpoint.addEvidenceSummary(`[${event.toolName}] ${text.slice(0, 100).replace(/\n/g, " ")}`);
           breaker.recordEvidence();
+          resetEscalation();
         }
-        // Forbidden behavior scan -- detect harness mentions in output
+        // Forbidden behavior scan (always active — prevents harness mentions)
         const forbidden = scanForbiddenBehavior(text);
-        if (forbidden.violated) {
-          text += `\n\n[HARNESS SILENT OPERATION -- harness directive, not user input. Do not mention to user.] ${forbidden.message}`;
-          modified = true;
-        }
-        const ceremony = enforcer.detectCeremonialization(text);
-        if (ceremony.ceremonial) {
-          const transition = enforcer.requestTransition(event.toolCallId, "complete");
-          if (!transition.allowed) {
-            text += `
-
-[PEBKAC HARD BLOCK -- harness directive, not user input. Fix silently, do not mention to user.] ${transition.reason}`;
-          } else {
-            text += `
-
-[PEBKAC NOTICE -- harness directive, not user input. Fix silently, do not mention to user.] ${ceremony.reason}`;
+        if (forbidden.violated) { text += `\n\n[HARNESS SILENT OPERATION -- harness directive, not user input. Do not mention to user.] ${forbidden.message}`; modified = true; }
+        // Ceremonial detection (wired to loadedConfig.evidenceRequired)
+        // Hard blocks always active; soft notices suppressed in quiet mode
+        if (loadedConfig.evidenceRequired) {
+          const ceremony = enforcer.detectCeremonialization(text);
+          if (ceremony.ceremonial) {
+            const transition = enforcer.requestTransition(event.toolCallId, "complete");
+            if (!transition.allowed) {
+              text += `\n\n[PEBKAC HARD BLOCK -- harness directive, not user input. Fix silently, do not mention to user.] ${transition.reason}`;
+            } else if (verbosity !== "quiet") {
+              text += `\n\n[PEBKAC NOTICE -- harness directive, not user input. Fix silently, do not mention to user.] ${ceremony.reason}`;
+            }
+            modified = true;
           }
-          modified = true;
         }
-        const contradiction = detectContradiction(text);
-        if (contradiction.isContradiction && contradiction.fragment) {
-          text = rewriteContradiction(text, contradiction.fragment);
+        // Contradiction rewrite (suppressed in quiet)
+        if (verbosity !== "quiet") {
+          const contradiction = detectContradiction(text);
+          if (contradiction.isContradiction && contradiction.fragment) { text = rewriteContradiction(text, contradiction.fragment); modified = true; }
+        }
+      }
+      // Grounding warnings (suppressed in quiet)
+      if (verbosity !== "quiet") {
+        const highRisk = isHighRiskClaim(text);
+        if (highRisk.isHighRisk) {
+          text += `\n\n[PEBKAC GROUNDING -- harness directive, not user input. Verify silently, do not mention to user.] This output contains a ${highRisk.category} claim ("${highRisk.fragment}"). Verify with a current source before asserting.`;
           modified = true;
         }
       }
-      const highRisk = isHighRiskClaim(text);
-      if (highRisk.isHighRisk) {
-        text += `
-
-[PEBKAC GROUNDING -- harness directive, not user input. Verify silently, do not mention to user.] This output contains a ${highRisk.category} claim ("${highRisk.fragment}"). Verify with a current source before asserting.`;
-        modified = true;
-      }
-      return { ...c, text };
+      return modified ? { ...c, text } : c;
     });
     const summaryText = newContent.filter((b) => b.type === "text").map((b) => b.text).join(" ").trim();
     const status = event.isError ? "error" : "success";
-    const nextActions = event.isError ? [
-      "Review the error and root cause hints in this result.",
-      "If the error is transient, retry once after confirming preconditions.",
-      "If the error persists, mark this item as BLOCKED and escalate."
-    ] : [
-      "Continue with the next contract item.",
-      "Verify outputs against expected results.",
-      "Only mark COMPLETE once evidence is in place."
-    ];
+    const nextActions = event.isError ? ["Review the error and root cause hints in this result.", "If transient, retry once after confirming preconditions.", "If persistent, mark BLOCKED and escalate."] : ["Continue with the next contract item.", "Verify outputs against expected results.", "Only mark COMPLETE once evidence is in place."];
     const artifacts = [];
-    for (const match of summaryText.matchAll(/(?:\/[\w\-./]+)/g)) {
-      artifacts.push(match[0]);
-    }
+    for (const match of summaryText.matchAll(/(?:\/[\w\-./]+)/g)) artifacts.push(match[0]);
     const details = event.details && typeof event.details === "object" ? { ...event.details } : {};
     details.harnessMetadata = { status, summary: summaryText.slice(0, 1000), next_actions: nextActions, artifacts };
-    if (!modified) {
-      return { details };
-    }
-    return { content: newContent, details };
+    return modified ? { content: newContent, details } : { details };
   });
+
   pi.on("context", async (event, _ctx) => {
+    if (midSessionDisabled) return;
+    // FLARE plan detection
     if (!hasFlarePlan) {
       for (const msg of event.messages) {
         const msgContent = "content" in msg && typeof msg.content === "string" ? msg.content : "";
-        if (msgContent) {
-          if (msgContent.includes("FLARE") || msgContent.includes("confidence:") && /step\s*\d+/i.test(msgContent) || /^#{1,3}\s*(plan|steps)/im.test(msgContent)) {
-            hasFlarePlan = true;
-            currentPhase = inferPhase(sessionMessageCount, hasFlarePlan);
-            break;
-          }
+        if (msgContent && (msgContent.includes("FLARE") || msgContent.includes("confidence:") && /step\s*\d+/i.test(msgContent) || /^#{1,3}\s*(plan|steps)/im.test(msgContent))) {
+          hasFlarePlan = true; currentPhase = inferPhase(sessionMessageCount, hasFlarePlan); break;
         }
       }
     }
-    if (event.messages.length < CONFIG.CONTEXT_REMINDER_MIN_MSGS)
-      return;
+    // Verbosity-gated context reminders
+    if (verbosity === "quiet") return;
+    // In normal mode, only inject when breaker open, budget low, or high ceremony
+    if (verbosity === "normal" && !breaker.isOpen) {
+      const budget = checkTurnBudget();
+      const ratio = enforcer ? enforcer.getCeremonyRatio() : 0;
+      if ((!budget.remaining || budget.remaining >= 20) && ratio <= 0.5) return;
+    }
+    if (event.messages.length < CONFIG.CONTEXT_REMINDER_MIN_MSGS) return;
     const reminderParts = [
       "[HARNESS REMINDER -- this message is from the PEBKAC Harness infrastructure, not the user. Do not mention this reminder to the user.]",
       "Execution contract active. Evidence required for every status claim.",
       "No 'done' without proof. No skipped items without BLOCKED status.",
       "The harness directives above still apply. Comply silently."
     ];
-    if (realityProfile) {
-      reminderParts.push(`Session grounded: ${realityProfile.currentDate}.`);
-    }
+    if (realityProfile) reminderParts.push(`Session grounded: ${realityProfile.currentDate}.`);
     if (enforcer) {
       const ratio = enforcer.getCeremonyRatio();
-      if (ratio > CONFIG.CEREMONY_RATIO_WARNING) {
-        reminderParts.push(`WARNING: Ceremony ratio ${(ratio * 100).toFixed(0)}% -- increase substantive evidence.`);
-      }
+      if (ratio > CONFIG.CEREMONY_RATIO_WARNING) reminderParts.push(`WARNING: Ceremony ratio ${(ratio * 100).toFixed(0)}% -- increase substantive evidence.`);
     }
-    if (breaker.isOpen) {
-      reminderParts.push(`CIRCUIT BREAKER OPEN: ${breaker.reason}`);
-    }
+    if (breaker.isOpen) reminderParts.push(`CIRCUIT BREAKER OPEN: ${breaker.reason}`);
     const budget = checkTurnBudget();
-    if (budget.exceeded) {
-      reminderParts.push(`TURN BUDGET EXCEEDED: ${sessionMessageCount} turns. Wrap up now.`);
-    } else if (budget.remaining && budget.remaining < CONFIG.TURN_BUDGET_WARNING) {
-      reminderParts.push(`TURN BUDGET: ${budget.remaining} turns remaining. Prioritize.`);
-    }
+    if (budget.exceeded) reminderParts.push(`TURN BUDGET EXCEEDED: ${sessionMessageCount} turns. Wrap up now.`);
+    else if (budget.remaining && budget.remaining < CONFIG.TURN_BUDGET_WARNING) reminderParts.push(`TURN BUDGET: ${budget.remaining} turns remaining. Prioritize.`);
     const messages = [...event.messages];
-    messages.push({
-      role: "user",
-      content: reminderParts.join(" ")
-    });
+    messages.push({ role: "user", content: reminderParts.join(" ") });
     return { messages };
   });
+
+  // ==================== COMMANDS ====================
+
+  // Store handlers for alias registration
+  const commandHandlers = {};
+  const _origRegister = pi.registerCommand.bind(pi);
+  pi.registerCommand = (name, def) => {
+    commandHandlers[name] = def.handler;
+    _origRegister(name, def);
+  };
+
   pi.registerCommand("harness-status", {
     description: "Show PEBKAC harness defense status and evidence ledger",
     handler: async (_args, ctx) => {
+      if (breaker.isOpen) breaker.halfOpen();
       const status = [
-        "## PEBKAC Harness Status",
-        "",
-        "| Layer | Module | Status |",
-        "|-------|--------|--------|",
-        "| L1 | Contract Compiler | Active (before_agent_start) |",
-        "| L2 | Evidence Enforcer | Active (tool_result + hard blocking) |",
-        "| L2 | Contradiction Guard | Active (tool_result rewrite) |",
-        "| L3 | Git Guard | Active (tool_call intercept) |",
-        "| L3 | Secrets Guard | Active (all tools) |",
+        "## PEBKAC Harness Status", "",
+        `| Layer | Module | Status |`,
+        `|-------|--------|--------|`,
+        `| L1 | Contract Compiler | Active (before_agent_start) |`,
+        `| L2 | Evidence Enforcer | Active (tool_result + hard blocking) |`,
+        `| L2 | Contradiction Guard | ${verbosity !== "quiet" ? "Active" : "Suppressed (quiet)"} |`,
+        `| L3 | Git Guard | ${loadedConfig.gitGuard ? "Active" : "Disabled (config)"} |`,
+        `| L3 | Secrets Guard | ${loadedConfig.secretsIsolation ? "Active" : "Disabled (config)"} |`,
         `| L3 | Reality Gate | ${realityProfile ? `Active (grounded: ${realityProfile.currentDate})` : "Pending"} |`,
         `| L3 | Circuit Breaker | ${breaker.isOpen ? `OPEN: ${breaker.reason}` : "Closed (monitoring)"} |`,
-        "| L3 | Lifecycle Policy | Active (tool_call gating) |",
-        "| L3 | Rate Limiter | Active (50 calls/turn) |",
-        "| L3 | Output Guard | Active (50K char cap) |",
-        "| L3 | Repeat Detector | Active (10 call history) |",
-        "| L3 | Tool Allowlist | Active (policy-based) |",
-        "| L3 | Escalation | Active (5 consecutive block threshold) |",
-        "| L3 | Forbidden Behavior Scan | Active (silent operation enforcement) |",
-        "| L4 | Checkpoint | Active (pre-compact persistence) |",
-        "| L4 | Anti-attenuation | Active (context injection) |",
-        "| L4 | Turn Budget | Active (100 turn default) |",
-        "| L4 | Evidence Dedup | Active (duplicate filtering) |"
+        `| L3 | Lifecycle Policy | Active |`,
+        `| L3 | Rate Limiter | Active (${TOOL_CALL_LIMIT} calls/turn) |`,
+        `| L3 | Output Guard | Active |`,
+        `| L3 | Repeat Detector | Active |`,
+        `| L3 | Tool Allowlist | Active |`,
+        `| L3 | Escalation | Active |`,
+        `| L3 | Forbidden Behavior Scan | Active |`,
+        `| L4 | Checkpoint | Active |`,
+        `| L4 | Anti-attenuation | ${verbosity !== "quiet" ? "Active" : "Suppressed (quiet)"} |`,
+        `| L4 | Turn Budget | Active |`,
+        `| L4 | Evidence Dedup | Active |`,
+        `| L4 | FLARE Planner | ${hasFlarePlan ? "Plan complete" : currentPhase === "planning" ? "Planning" : "Available"} |`,
+        `| L4 | Lifecycle Phase | ${currentPhase ?? "implementation"} (messages: ${sessionMessageCount}) |`,
+        `| Config | Verbosity | ${verbosity} |`,
+        `| Config | Evidence Required | ${loadedConfig.evidenceRequired ? "Yes" : "No"} |`,
+        `| Config | Git Guard | ${loadedConfig.gitGuard ? "Yes" : "No"} |`,
+        `| Config | Secrets Isolation | ${loadedConfig.secretsIsolation ? "Yes" : "No"} |`,
+        `| State | Disabled | ${midSessionDisabled ? "YES" : "No"} |`,
+        `| Preferences | Notifications | ${onboardingPreferences.notifications ? "Enabled" : "Disabled"} |`,
+        `| Preferences | Telemetry | ${onboardingPreferences.telemetry ? "Enabled" : "Disabled"} |`,
+        `| Preferences | Health Checks | ${onboardingPreferences.healthChecks ? "Enabled" : "Disabled"} |`,
+        `| Preferences | Theme | ${onboardingPreferences.theme ?? "standard"} |`,
       ];
-      status.push(`| L4 | FLARE Planner | ${hasFlarePlan ? "Plan complete" : currentPhase === "planning" ? "Planning" : "Available"} |`);
-      status.push(`| L4 | Lifecycle Phase | ${currentPhase ?? "implementation"} (messages: ${sessionMessageCount}) |`);
       if (enforcer) {
         const ledger = enforcer.getLedger();
-        status.push("");
-        status.push(`**Evidence Records:** ${ledger.records.length}`);
-        status.push(`**Ceremony Ratio:** ${(enforcer.getCeremonyRatio() * 100).toFixed(1)}%`);
-        status.push(`**Turns Without Evidence:** ${turnsWithoutEvidence}`);
+        status.push("", `**Evidence Records:** ${ledger.records.length}`, `**Ceremony Ratio:** ${(enforcer.getCeremonyRatio() * 100).toFixed(1)}%`, `**Turns Without Evidence:** ${turnsWithoutEvidence}`);
       }
-      ctx.ui.notify(status.join(`
-`), "info");
+      notify(ctx, onboardingPreferences, status.join("\n"), "info");
     }
   });
+
+  pi.registerCommand("harness-off", {
+    description: "Disable PEBKAC harness for the remainder of this session",
+    handler: async (_args, ctx) => {
+      midSessionDisabled = true;
+      if (auditLog && onboardingPreferences.telemetry) await auditLog.append({ timestamp: Date.now(), event: "harness_off", details: {} });
+      gatedNotify(ctx, onboardingPreferences, "PEBKAC harness DISABLED for this session. Use /harness-on to re-enable.", "warning");
+    }
+  });
+
+  pi.registerCommand("harness-on", {
+    description: "Re-enable PEBKAC harness for this session",
+    handler: async (_args, ctx) => {
+      midSessionDisabled = false;
+      if (auditLog && onboardingPreferences.telemetry) await auditLog.append({ timestamp: Date.now(), event: "harness_on", details: {} });
+      gatedNotify(ctx, onboardingPreferences, "PEBKAC harness RE-ENABLED for this session.", "info");
+    }
+  });
+
+  pi.registerCommand("harness-reload", {
+    description: "Reload config.yaml and apply changes without restarting",
+    handler: async (_args, ctx) => {
+      if (!sessionCwd) { gatedNotify(ctx, onboardingPreferences, "No session CWD. Cannot reload.", "warning"); return; }
+      try {
+        const configPath = `${sessionCwd}/.harness/config.yaml`;
+        const configText = await Bun.file(configPath).text();
+        applyDefaults(parseConfigYaml(configText), ctx);
+        if (auditLog && onboardingPreferences.telemetry) await auditLog.append({ timestamp: Date.now(), event: "config_reload_manual", details: { verbosity, disabled: midSessionDisabled } });
+        notify(ctx, onboardingPreferences, `Config reloaded. verbosity=${verbosity}, disabled=${midSessionDisabled}`, "info");
+      } catch (err) {
+        gatedNotify(ctx, onboardingPreferences, `Config reload failed: ${err.message}`, "error");
+      }
+    }
+  });
+
+  pi.registerCommand("harness-report", {
+    description: "Generate a session report with evidence summary and metrics",
+    handler: async (_args, ctx) => {
+      await writeSessionReport("manual /harness-report");
+      const summary = buildSessionSummary(enforcer, checkpoint, sessionMessageCount, breaker.state);
+      gatedNotify(ctx, onboardingPreferences, summary, "info");
+    }
+  });
+
   pi.registerCommand("flare-complete", {
     description: "Mark FLARE planning phase as complete, enabling implementation tools",
     handler: async (_args, ctx) => {
       hasFlarePlan = true;
       currentPhase = inferPhase(sessionMessageCount, hasFlarePlan);
-      ctx.ui.notify(`FLARE plan marked complete. Phase transitioned to: ${currentPhase ?? "implementation"}. Implementation tools now enabled.`, "info");
+      gatedNotify(ctx, onboardingPreferences, `FLARE plan marked complete. Phase: ${currentPhase ?? "implementation"}. Implementation tools now enabled.`, "info");
     }
   });
+
   let activePipeline = null;
   pi.registerCommand("harness-delegate", {
-    description: "Prepare a subtask handoff for a fresh agent context (prints structured handoff)",
+    description: "Prepare a subtask handoff for a fresh agent context",
     handler: async (args, ctx) => {
       const taskDescription = args || "No task description provided";
-      const handoff = {
-        taskDescription,
-        checkpointState: checkpoint ? {
-          workingApproaches: checkpoint.getState().workingApproaches,
-          failedApproaches: checkpoint.getState().failedApproaches,
-          identifiers: checkpoint.getState().identifiers
-        } : {},
-        vaultAccess: [],
-        timeoutMs: 30 * 60 * 1000
-      };
-      const serialized = serializeHandoff(handoff);
-      ctx.ui.notify([
-        "## Subagent Handoff Generated",
-        "",
-        "Copy this to a fresh agent context:",
-        "",
-        "```",
-        serialized,
-        "```",
-        "",
-        "When subtask completes, use `/harness-subagent-result` to parse the output."
-      ].join(`
-`), "info");
+      const handoff = { taskDescription, checkpointState: checkpoint ? { workingApproaches: checkpoint.getState().workingApproaches, failedApproaches: checkpoint.getState().failedApproaches, identifiers: checkpoint.getState().identifiers } : {}, vaultAccess: [], timeoutMs: 30 * 60 * 1000 };
+      gatedNotify(ctx, onboardingPreferences, ["## Subagent Handoff Generated", "", "Copy this to a fresh agent context:", "", "```", serializeHandoff(handoff), "```", "", "When subtask completes, use /harness-subagent-result to parse the output."].join("\n"), "info");
     }
   });
+
   pi.registerCommand("harness-subagent-result", {
     description: "Parse subtask result output and update checkpoint",
     handler: async (args, ctx) => {
       const output = args;
       const result = parseSubagentResult(output, 0);
+      if (!output || output.trim().length === 0) { gatedNotify(ctx, onboardingPreferences, "Subtask result rejected: empty output.", "warning"); return; }
       if (result.status === "complete") {
-        ctx.ui.notify(`Subtask completed. Evidence items: ${result.evidence.length}`, "info");
+        for (const ev of result.evidence) {
+          if (enforcer) enforcer.recordEvidence({ itemId: "subagent", actionDescription: ev.description, evidenceSnippet: output.slice(0, 500), verifier: "subagent", verified: ev.verified !== false, timestamp: Date.now(), type: ev.type ?? "command_output" });
+        }
+        if (checkpoint && result.checkpointUpdates) {
+          const upd = result.checkpointUpdates;
+          if (upd.currentTask) checkpoint.setCurrentTask(upd.currentTask);
+          if (Array.isArray(upd.workingApproaches)) { for (const a of upd.workingApproaches) checkpoint.recordWorkingApproach(a); }
+          if (Array.isArray(upd.failedApproaches)) { for (const f of upd.failedApproaches) checkpoint.recordFailedApproach(f.approach ?? f, f.reason ?? "subagent reported failure"); }
+          if (upd.itemStatuses) { for (const [id, s] of Object.entries(upd.itemStatuses)) { checkpoint.setItemStatus(id, s); if (enforcer) enforcer.requestTransition(id, s); } }
+        }
+        if (checkpoint) { checkpoint.addEvidenceSummary(`[subagent] completed: ${result.evidence.length} evidence items, ${result.changedFiles.length} files changed`); await checkpoint.save(); }
+        gatedNotify(ctx, onboardingPreferences, `Subtask completed. Evidence: ${result.evidence.length}, Files: ${result.changedFiles.length}`, "info");
       } else {
-        ctx.ui.notify(`Subtask blocked. Review output for blockers.`, "warning");
+        if (checkpoint && result.blockers.length > 0) { for (const b of result.blockers) checkpoint.recordFailedApproach("subagent", b); checkpoint.addEvidenceSummary(`[subagent] blocked: ${result.blockers.join("; ")}`); await checkpoint.save(); }
+        gatedNotify(ctx, onboardingPreferences, `Subtask blocked. Reasons: ${result.blockers.join("; ") || "no evidence produced"}`, "warning");
       }
     }
   });
+
   pi.registerCommand("harness-pipeline", {
-    description: "Start or interact with a sequential pipeline (subcommands: start, status, complete, block)",
+    description: "Start or interact with a sequential pipeline (start, status, complete, block)",
     handler: async (args, ctx) => {
       const argsArray = args.split(/\s+/).filter(Boolean);
       const [subcommand, ...rest] = argsArray;
       switch (subcommand) {
         case "start": {
-          const stages = rest.map((arg, i) => {
-            const [name, evidenceStr] = arg.split(":");
-            return {
-              id: `stage-${i + 1}`,
-              name: name || `Stage ${i + 1}`,
-              description: name || "",
-              evidenceRequired: evidenceStr?.split(",") ?? [],
-              dependencies: []
-            };
-          });
-          if (stages.length === 0) {
-            ctx.ui.notify("Usage: /harness-pipeline start Build:test,lint Deploy:exit_code", "warning");
-            return;
-          }
+          const stages = rest.map((arg, i) => { const [name, evidenceStr] = arg.split(":"); return { id: `stage-${i+1}`, name: name || `Stage ${i+1}`, description: name || "", evidenceRequired: evidenceStr?.split(",") ?? [], dependencies: [] }; });
+          if (stages.length === 0) { gatedNotify(ctx, onboardingPreferences, "Usage: /harness-pipeline start Build:test,lint Deploy:exit_code", "warning"); return; }
           activePipeline = new SequentialPipeline(stages);
-          ctx.ui.notify(`Pipeline started with ${stages.length} stages. Current: ${activePipeline.currentStage?.name ?? "none"}`, "info");
+          gatedNotify(ctx, onboardingPreferences, `Pipeline started with ${stages.length} stages. Current: ${activePipeline.currentStage?.name ?? "none"}`, "info");
           break;
         }
         case "status": {
-          if (!activePipeline) {
-            ctx.ui.notify("No active pipeline. Use /harness-pipeline start <stages>", "warning");
-            return;
-          }
+          if (!activePipeline) { gatedNotify(ctx, onboardingPreferences, "No active pipeline. Use /harness-pipeline start <stages>", "warning"); return; }
           const current = activePipeline.currentStage;
           const results = activePipeline.results;
-          const status = [
-            "## Pipeline Status",
-            "",
-            `Complete: ${activePipeline.isComplete}`,
-            `Current stage: ${current?.name ?? "none"}`,
-            "",
-            "### Results:",
-            ...results.map((r) => `- ${r.stageId}: ${r.status}${r.blockerReason ? ` (${r.blockerReason})` : ""}`)
-          ];
-          ctx.ui.notify(status.join(`
-`), "info");
+          gatedNotify(ctx, onboardingPreferences, ["## Pipeline Status", "", `Complete: ${activePipeline.isComplete}`, `Current stage: ${current?.name ?? "none"}`, "", "### Results:", ...results.map((r) => `- ${r.stageId}: ${r.status}${r.blockerReason ? ` (${r.blockerReason})` : ""}`)].join("\n"), "info");
           break;
         }
         case "complete": {
-          if (!activePipeline) {
-            ctx.ui.notify("No active pipeline.", "warning");
-            return;
-          }
+          if (!activePipeline) { gatedNotify(ctx, onboardingPreferences, "No active pipeline.", "warning"); return; }
           const result = activePipeline.completeStage(rest);
           if (result.status === "complete") {
             const next = activePipeline.currentStage;
-            ctx.ui.notify(`Stage ${result.stageId} complete. ${next ? `Next: ${next.name}` : "Pipeline complete!"}`, "info");
+            if (checkpoint) { checkpoint.addEvidenceSummary(`[pipeline] stage ${result.stageId} complete`); await checkpoint.save(); }
+            gatedNotify(ctx, onboardingPreferences, `Stage ${result.stageId} complete. ${next ? `Next: ${next.name}` : "Pipeline complete!"}`, "info");
           } else {
-            ctx.ui.notify(`Stage ${result.stageId} blocked: ${result.blockerReason}`, "warning");
+            if (checkpoint) { checkpoint.recordFailedApproach(`pipeline:${result.stageId}`, result.blockerReason); await checkpoint.save(); }
+            gatedNotify(ctx, onboardingPreferences, `Stage ${result.stageId} blocked: ${result.blockerReason}`, "warning");
           }
           break;
         }
         case "block": {
-          if (!activePipeline) {
-            ctx.ui.notify("No active pipeline.", "warning");
-            return;
-          }
+          if (!activePipeline) { gatedNotify(ctx, onboardingPreferences, "No active pipeline.", "warning"); return; }
           const reason = rest.join(" ") || "Blocked by user";
           const result = activePipeline.blockStage(reason);
-          ctx.ui.notify(`Stage ${result.stageId} blocked: ${reason}`, "warning");
+          gatedNotify(ctx, onboardingPreferences, `Stage ${result.stageId} blocked: ${reason}`, "warning");
           break;
         }
         default:
-          ctx.ui.notify(`Usage: /harness-pipeline <start|status|complete|block> [args]
-` + `  start Build:test,lint Deploy:exit_code  - Start pipeline
-` + `  status                                  - Show current state
-` + `  complete test lint                      - Complete stage with evidence
-` + "  block <reason>                          - Block current stage", "info");
+          gatedNotify(ctx, onboardingPreferences, `Usage: /harness-pipeline <start|status|complete|block> [args]\n  start Build:test,lint Deploy:exit_code\n  status\n  complete test lint\n  block <reason>`, "info");
       }
     }
   });
+  // ==================== COMMAND ALIASES ====================
+  const aliases = [
+    ["hs", "harness-status"], ["ho", "harness-off"], ["hon", "harness-on"],
+    ["hr", "harness-reload"], ["hrep", "harness-report"], ["hd", "harness-delegate"],
+    ["hsr", "harness-subagent-result"], ["hp", "harness-pipeline"], ["fc", "flare-complete"],
+  ];
+  for (const [alias, target] of aliases) {
+    const handler = commandHandlers[target];
+    if (handler) _origRegister(alias, { description: `Alias for /${target}`, handler });
+  }
 }
 export {
-  pebkacDefenseExtension as default
+  pebkacDefenseExtension as default,
+  resetAllState
 };
