@@ -826,10 +826,10 @@ describe("Config get/set/list", () => {
     const cwd = tempRoot();
     try {
       Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
-      expect(stdout.trim()).toBe("omp");
+      expect(JSON.parse(stdout).value).toBe("omp");
     } finally { cleanup(cwd); }
   });
 
@@ -837,10 +837,10 @@ describe("Config get/set/list", () => {
     const cwd = tempRoot();
     try {
       Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "defaults.evidence_required", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "defaults.evidence_required", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
-      expect(stdout.trim()).toBe("true");
+      expect(JSON.parse(stdout).value).toBe("true");
     } finally { cleanup(cwd); }
   });
 
@@ -850,10 +850,10 @@ describe("Config get/set/list", () => {
       Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const setResult = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "set", "agent_runtime", "claude", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       expect(setResult.exitCode).toBe(0);
-      const getResult = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const getResult = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(getResult.stdout);
       expect(getResult.exitCode).toBe(0);
-      expect(stdout.trim()).toBe("claude");
+      expect(JSON.parse(stdout).value).toBe("claude");
     } finally { cleanup(cwd); }
   });
 
@@ -866,16 +866,16 @@ describe("Config get/set/list", () => {
     } finally { cleanup(cwd); }
   });
 
-  test("config list outputs full config", () => {
+  test("config list outputs dashboard summary", () => {
     const cwd = tempRoot();
     try {
       Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "list", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "list", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
-      expect(stdout).toContain("version:");
-      expect(stdout).toContain("defaults:");
-      expect(stdout).toContain("agent_runtime:");
+      expect(stdout).toContain("Config");
+      expect(stdout).toContain("Verdict:");
+      expect(stdout).toContain("agent_runtime");
     } finally { cleanup(cwd); }
   });
 

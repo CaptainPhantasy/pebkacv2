@@ -1,0 +1,73 @@
+{
+  "project_name": "pebkac",
+  "completion_percentage": 85,
+  "tech_stack": [
+    "JavaScript (Bun native ESM)",
+    "Bun 1.3+ runtime",
+    "OMP harness extension API"
+  ],
+  "complexity_score": 6,
+  "team_size_minimum": 1,
+  "go_to_market_timeline": "N/A — internal developer tooling, not a market product",
+  "industry_vertical": "Developer Tools / AI Infrastructure",
+  "business_model": "Open-source internal tooling (AI agent defense harness)",
+  "technical_debt": 8,
+  "scalability_needs": "low",
+  "target_users": "AI agent operators using the OMP/OhMyPi harness who need automated execution-contract enforcement, evidence gating, and circuit-breaker protection",
+  "key_features": [
+    "4-layer defense extension (L1 contract compiler, L2 evidence enforcer, L3 guards, L4 checkpointing)",
+    "Evidence-required completion gating with hard blocks on ceremonial claims",
+    "Circuit breaker with half-open recovery on degradation scoring",
+    "Secrets guard: bash command + content-bearing tool redaction (single-pass)",
+    "Git guard: destructive command blocking (reset --hard, clean -fd, force push)",
+    "Reality gate: grounding warnings on version/security/pricing/CVE claims",
+    "Checkpoint persistence to .harness/checkpoints/latest.json",
+    "Turn budget enforcement with session report on exhaustion",
+    "Verbosity levels (full/normal/quiet) that genuinely gate notify/context/grounding",
+    "Config hot-reload via fs.watch + /harness-reload command",
+    "Mid-session enable/disable (/harness-on, /harness-off, PEBKAC_OFF env, sentinel file)",
+    "Sequential pipeline orchestrator with stage gating",
+    "Subagent handoff serialization + result parsing",
+    "CLI: init, status, doctor, launch, config, api-keys, hooks, platforms, plugins, flags, audit, mode, skill"
+  ],
+  "risks": [
+    "Single bundled 1812-line extension file — all modules in one artifact, edits require care",
+    "Config YAML parsed via regex extraction, not a real YAML parser — fragile on non-trivial configs",
+    "Multiple empty catch {} blocks (silent error swallowing) in best-effort paths — could mask bugs",
+    "No CI workflow visible in repo (.github/workflows absent) — tests run manually via bun test",
+    "CONTENT_BEARING_TOOLS declared twice (lines 1105 and 1195) — second shadows first, benign but sloppy",
+    "CircuitBreaker instantiated without parens (new CircuitBreaker) — unconventional style"
+  ],
+  "_evidence": {
+    "project_name": "package.json:2 name=\"pebkac-defense\", repo basename pebkac",
+    "completion_percentage": "15 issues resolved in Issues/pebkac_ISSUES.md; 200 tests pass; CLI has 16 commands all wired; 4-layer defense fully implemented; only CI + minor debt remain",
+    "tech_stack": "package.json type=module; bin/pebkac.js:1 shebang #!/usr/bin/env bun; .omp/extensions/pebkac-defense.js:5 @bun bundler marker",
+    "complexity_score": "1812-line extension with 20+ modules (AuditLog, CheckpointManager, CircuitBreaker, EvidenceEnforcer, etc.); 16 CLI commands; 4 defense layers — moderate complexity, single maintainer tractable",
+    "team_size_minimum": "Single-author project (Issues ledger owner 0-Main); one maintainer sufficient",
+    "go_to_market_timeline": "Internal tool, not a shipped product — N/A",
+    "industry_vertical": "AI agent harness defense layer — Developer Tools / AI Infrastructure category",
+    "business_model": "package.json no license/private field; Issues/SSOT show internal OMP harness usage — open-source internal tooling",
+    "technical_debt": "grep TODO|FIXME|HACK in lib/ bin/ = 0 matches; debt is structural (bundled file, regex YAML, empty catches) not marker-based",
+    "scalability_needs": "Per-session harness extension, single-user — low scalability requirement",
+    "target_users": "FLOYD.md:13 'Legacy AI project'; extension auto-installed via pebkac init for OMP harness operators",
+    "key_features": "bin/pebkac.js:15 KNOWN command set (16 commands); .omp/extensions/pebkac-defense.js:1196 pebkacDefenseExtension; status table at 1619-1656 lists all active layers",
+    "risks": "Code review 2026-06-17: wc -l .omp/extensions/pebkac-defense.js = 1812; parseConfigYaml:1222 regex; empty catch at 1296,1317,1339,1366; CONTENT_BEARING_TOOLS at 1105 and 1195; CircuitBreaker instantiation at 1107",
+    "template": "/Volumes/SanDisk1Tb/.supercache/templates/repository-report-template.md",
+    "spec": "/Volumes/SanDisk1Tb/.supercache/contracts/repository-report-spec.md",
+    "test_evidence": "bun test 2026-06-17: 200 pass, 0 fail, 609 expect() calls, 16 files, 5.51s",
+    "source_metrics": "wc -l: lib/ 8 files 1284 lines; bin/pebkac.js 375 lines; .omp/extensions/pebkac-defense.js 1812 lines; test/ 16 files 3274 lines"
+  },
+  "gate_statuses": {
+    "g1_tests_pass": { "status": "PASS", "evidence": "bun test: 200 pass / 0 fail / 609 expects / 16 files" },
+    "g2_no_placeholder_markers": { "status": "PASS", "evidence": "grep TODO|FIXME|HACK in lib/ bin/ = 0 matches" },
+    "g3_ssot_current": { "status": "PASS_WITH_NOTES", "evidence": "SSOT/pebkac_SSOT.md last updated 2026-05-24; verification log current through that date; this report refreshes 2026-06-17" },
+    "g4_issues_ledger_current": { "status": "PASS", "evidence": "Issues/pebkac_ISSUES.md: 15 issues all Resolved with resolution proof" },
+    "g5_governance_artifacts_present": { "status": "PASS", "evidence": "FLOYD.md, SSOT/, Issues/, .floyd/, .supercache symlink all present; .supercache_version=1.7.0" },
+    "g6_code_review_complete": { "status": "PASS", "evidence": "SSOT/pebkac_CODE_REVIEW.md 2026-06-17 — 6 findings, 0 critical" },
+    "g7_readiness_report_filled": { "status": "PASS", "evidence": "This file — all fields evidence-cited, no bootstrap defaults remain" }
+  },
+  "_verified": true,
+  "_critic_rounds": 3,
+  "_last_verified": "2026-06-17T00:55:00+00:00",
+  "_verified_by": "0-Main agent (evidence-grounded code review + test run)"
+}

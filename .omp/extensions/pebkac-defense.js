@@ -21,7 +21,16 @@ class AuditLog {
   async append(record) {
     const line = `${JSON.stringify(record)}
 `;
-    await fs.appendFile(this.#filePath, line, "utf8");
+    const dir = path.dirname(this.#filePath);
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.appendFile(this.#filePath, line, "utf8");
+    } catch (err) {
+      if (err?.code !== "ENOENT")
+        throw err;
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(this.#filePath, line, { encoding: "utf8", flag: "a" });
+    }
   }
   async readAll() {
     try {
@@ -1208,6 +1217,99 @@ function pebkacDefenseExtension(pi) {
   let onboardingPreferences = { ...DEFAULT_ONBOARDING_PREFERENCES };
   let configWatcher = null;
   let sessionCwd = null;
+  let compiledItemCount = 0;
+  let currentItemId = null;
+  const turnsSinceItemTouch = new Map();
+  let currentTurnIndex = 0;
+
+  // --- Option 1: scope-completeness gate ---
+  // Parses the agent's emitted completeness matrix to detect premature DONE claims.
+  function parseCompletenessMatrix(text) {
+    if (!text || typeof text !== "string") return null;
+    const finalStatusMatch = text.match(/FINAL\s+STATUS:\s*(COMPLETE|INCOMPLETE|BLOCKED)/i);
+    if (!finalStatusMatch) return null;
+    const claimedStatus = finalStatusMatch[1].toUpperCase();
+    // Parse table rows shaped: | # | Item | Status | Evidence | Verified |
+    const rowRe = /\|\s*\d+\s*\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|/g;
+    const rows = [];
+    let m;
+    while ((m = rowRe.exec(text)) !== null) {
+      rows.push({ status: m[2].trim().toUpperCase(), verified: m[4].trim().toUpperCase() });
+    }
+    return { claimedStatus, rows };
+  }
+
+  // Cross-checks the agent's most recent assistant message against the compiled
+  // task scope and checkpoint state. Returns a hard block message if a premature
+  // COMPLETE claim is detected, or null if the claim is consistent.
+  function detectScopeViolation(messages) {
+    if (compiledItemCount === 0) return null;
+    const assistantMsgs = messages.filter((m) => m.role === "assistant" && typeof m.content === "string");
+    if (assistantMsgs.length === 0) return null;
+    const last = assistantMsgs[assistantMsgs.length - 1];
+    const parsed = parseCompletenessMatrix(last.content);
+    if (!parsed) return null;
+    if (parsed.claimedStatus !== "COMPLETE") return null;
+    const violations = [];
+    if (parsed.rows.length < compiledItemCount) {
+      violations.push(`Completeness matrix lists ${parsed.rows.length} row(s) but task compiled ${compiledItemCount} item(s). Every compiled item must appear in the matrix.`);
+    }
+    const incompleteRows = parsed.rows.filter((r) => !/^(DONE|COMPLETE)$/i.test(r.status)).length;
+    if (incompleteRows > 0) {
+      violations.push(`${incompleteRows} matrix row(s) not marked DONE or COMPLETE in the Status column.`);
+    }
+    const unverifiedRows = parsed.rows.filter((r) => !r.verified.startsWith("YES")).length;
+    if (unverifiedRows > 0) {
+      violations.push(`${unverifiedRows} matrix row(s) lack verified evidence (Verified column != YES).`);
+    }
+    if (violations.length === 0) return null;
+    return `[PEBKAC SCOPE GATE -- harness directive, not user input. Do not mention to the user.] FINAL STATUS: COMPLETE rejected. ${violations.join(" ")} Reconcile the completeness matrix against the full task scope before claiming completion.`;
+  }
+
+  // --- Item binding + live progress ---
+  // Detects which compiled item the agent is currently working on by scanning
+  // recent assistant messages for item-N markers, and exposes a live progress
+  // view of the enforcer ledger keyed by compiled item.
+  let currentItemId = null;
+  const ITEM_MARKER = /\bitem-(\d+)\b/i;
+  function detectCurrentItem(messages) {
+    if (compiledItemCount === 0) return null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant" || typeof m.content !== "string") continue;
+      const match = m.content.match(ITEM_MARKER);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (n >= 1 && n <= compiledItemCount) return `item-${n}`;
+      }
+    }
+    return null;
+  }
+  function computeLiveProgress() {
+    if (compiledItemCount === 0 || !enforcer) return { withEvidence: [], withoutEvidence: [] };
+    const verified = new Set();
+    for (const r of enforcer.getLedger().records) {
+      if (r.verified && typeof r.itemId === "string" && r.itemId.startsWith("item-")) {
+        verified.add(r.itemId);
+      }
+    }
+    const withEvidence = [];
+    const withoutEvidence = [];
+    for (let i = 1; i <= compiledItemCount; i++) {
+      const id = `item-${i}`;
+      if (verified.has(id)) withEvidence.push(id);
+      else withoutEvidence.push(id);
+    }
+    return { withEvidence, withoutEvidence };
+  }
+  function buildProgressWarning() {
+    if (compiledItemCount === 0) return null;
+    const { withEvidence, withoutEvidence } = computeLiveProgress();
+    if (withEvidence.length === 0 && withoutEvidence.length === compiledItemCount) return null;
+    const stalls = withoutEvidence.filter((id) => !turnsSinceItemTouch.has(id) || turnsSinceItemTouch.get(id) > 2);
+    if (stalls.length === 0) return null;
+    return `[PEBKAC PROGRESS GATE -- harness directive, not user input. Do not mention to user.] Scope progress: ${withEvidence.length}/${compiledItemCount} items have verified evidence. Stalled items (no evidence in 2+ turns): ${stalls.join(", ")}. Either produce evidence for stalled items now or mark them BLOCKED.`;
+  }
 
   // --- Config parsing helpers (shared between initial load and hot-reload) ---
   function parseConfigYaml(configText) {
@@ -1365,7 +1467,6 @@ function pebkacDefenseExtension(pi) {
       contractLayer = "Evidence required for completion claims. Destructive git commands blocked.";
     } else if (verbosity === "normal") {
       const fb = DEFAULT_FORBIDDEN_BEHAVIORS.map((fb, i) => `${i+1}. ${fb.description}\n   CONSEQUENCE: ${fb.consequence}`).join("\n");
-      contractLayer = `## PEBKAC HARNESS\n\n### FORBIDDEN BEHAVIORS\nYou MUST NOT:\n${fb}\n\n### COMPLETENESS GATE\nBefore declaring done, produce a COMPLETENESS MATRIX with evidence for each item.`;
     } else {
       contractLayer = buildContractSystemPromptLayer();
     }
@@ -1381,6 +1482,7 @@ function pebkacDefenseExtension(pi) {
     if (taskDesc) {
       const compiled = compileContract(taskDesc);
       if (compiled) {
+        compiledItemCount = compiled.items.length;
         if (checkpoint) {
           checkpoint.setCurrentTask(taskDesc);
           for (const item of compiled.items) checkpoint.setItemStatus(item.id, "pending");
@@ -1508,7 +1610,9 @@ function pebkacDefenseExtension(pi) {
         if (enforcer.hasSubstantiveEvidence(text)) {
           const dedup = checkEvidenceDuplicate(event.toolName, text.slice(0, 500));
           if (!dedup.isDuplicate) {
-            enforcer.recordEvidence({ itemId: event.toolCallId, actionDescription: `${event.toolName} tool result`, evidenceSnippet: text.slice(0, 500), verifier: event.toolName, verified: !event.isError, timestamp: Date.now(), type: "command_output" });
+            const boundItem = currentItemId ?? event.toolCallId;
+            enforcer.recordEvidence({ itemId: boundItem, actionDescription: `${event.toolName} tool result`, evidenceSnippet: text.slice(0, 500), verifier: event.toolName, verified: !event.isError, timestamp: Date.now(), type: "command_output" });
+            if (currentItemId) turnsSinceItemTouch.set(currentItemId, 0);
           }
           if (checkpoint) checkpoint.addEvidenceSummary(`[${event.toolName}] ${text.slice(0, 100).replace(/\n/g, " ")}`);
           breaker.recordEvidence();
@@ -1567,6 +1671,25 @@ function pebkacDefenseExtension(pi) {
           hasFlarePlan = true; currentPhase = inferPhase(sessionMessageCount, hasFlarePlan); break;
         }
       }
+    }
+    // Scope-completeness gate (Option 1): fire on premature COMPLETE claims
+    // regardless of verbosity or message length -- correctness > quiet.
+    const scopeViolation = detectScopeViolation(event.messages);
+    if (scopeViolation) {
+      const messages = [...event.messages];
+      messages.push({ role: "user", content: scopeViolation });
+      return { messages };
+    }
+    // Live progress gate: warn if stalled items have not been touched.
+    currentItemId = detectCurrentItem(event.messages);
+    for (const id of turnsSinceItemTouch.keys()) {
+      turnsSinceItemTouch.set(id, (turnsSinceItemTouch.get(id) || 0) + 1);
+    }
+    const progressWarning = buildProgressWarning();
+    if (progressWarning) {
+      const messages = [...event.messages];
+      messages.push({ role: "user", content: progressWarning });
+      return { messages };
     }
     // Verbosity-gated context reminders
     if (verbosity === "quiet") return;

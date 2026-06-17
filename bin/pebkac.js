@@ -1,796 +1,375 @@
 #!/usr/bin/env bun
-import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, unlinkSync, statSync, readdirSync } from "fs";
-import { dirname, join, resolve } from "path";
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from "fs";
+import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
+import { EXIT, boolFromFlags, detectRuntime, ensureProject, fileSize, harnessPaths, hasFlag, lineCount, listJsonFiles, optionValue, readAgentRuntime, readConfigText, readJson, resolveCwd, unknownFlags, writeConfigValue, writeJson, yamlGet, yamlSet } from "../lib/common.js";
+import { makeUi, groupedHelp, commandHelp, row, maybeSplash } from "../lib/ui.js";
+import { runApiKeys } from "../lib/api-keys.js";
+import { runHooks, getHooksStatus, installHooks } from "../lib/git-hooks.js";
+import { runPlatforms, installPlatforms, platformStatus } from "../lib/platforms.js";
+import { DEFAULT_FLAGS, runAudit, runFlags, runMode, runPlugins, runSkill, scanPlugins } from "../lib/ops.js";
 
-// ANSI color helpers — zero dependencies
-const C = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  red: "\x1b[31m",
-  green: "\x1b[32m",
-  yellow: "\x1b[33m",
-  blue: "\x1b[34m",
-  cyan: "\x1b[36m",
-};
-const NO_COLOR = !!process.env.NO_COLOR;
-function c(color, text) { return NO_COLOR ? text : `${C[color]}${text}${C.reset}`; }
-function icon(status) {
-  if (NO_COLOR) return status === "pass" ? "[PASS]" : status === "fail" ? "[FAIL]" : status === "warn" ? "[WARN]" : status === "info" ? "[INFO]" : "[??]";
-  const map = { pass: `${C.green}✔${C.reset}`, fail: `${C.red}✘${C.reset}`, warn: `${C.yellow}⚠${C.reset}`, info: `${C.blue}ℹ${C.reset}` };
-  return map[status] ?? "?";
-}
-function header(text) { return c("bold", c("cyan", text)); }
-function label(text) { return c("bold", text); }
-function dim(text) { return c("dim", text); }
-function green(t) { return c("green", t); }
-function red(t) { return c("red", t); }
-function yellow(t) { return c("yellow", t); }
-
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
+const KNOWN = new Set(["help", "init", "status", "doctor", "off", "on", "launch", "version", "config", "completion", "api-keys", "hooks", "platforms", "plugins", "flags", "audit", "mode", "skill"]);
+const KNOWN_FLAGS = new Set(["--help", "-h", "--version", "-v", "--quiet", "-q", "--json", "--cwd", "--verbose", "-V", "--dry-run", "--non-interactive", "--yes", "--theme", "--verbosity", "--enabled", "--no-enabled", "--telemetry", "--no-telemetry", "--notifications", "--no-notifications", "--health-checks", "--no-health-checks", "--key-from-env", "--limit"]);
+const quiet = hasFlag(args, "--quiet", "-q");
+const json = hasFlag(args, "--json");
+const verbose = hasFlag(args, "--verbose", "-V");
+const ui = makeUi({ quiet, json });
 
-
-function hasFlag(name) {
-  return args.includes(name);
+function packageInfo() {
+  try { return JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")); }
+  catch { return { name: "PEBKAC", version: "unknown" }; }
 }
 
-const quietMode = hasFlag("--quiet") || hasFlag("-q");
-const verboseMode = hasFlag("--verbose") || hasFlag("-V");
-const KNOWN_FLAGS = new Set(["--quiet", "-q", "--verbose", "-V", "--json", "--cwd", "--help", "--non-interactive", "--yes", "--version", "-v", "--dry-run", "--theme", "--verbosity", "--enabled", "--no-enabled", "--telemetry", "--no-telemetry", "--notifications", "--no-notifications", "--health-checks", "--no-health-checks"]);
-const unknownFlags = args.filter(a => a.startsWith("-") && !KNOWN_FLAGS.has(a));
-if (unknownFlags.length > 0 && !args.includes("completion")) {
-  console.error(`${yellow("Warning:")} Unknown flag${unknownFlags.length > 1 ? "s" : ""}: ${unknownFlags.join(", ")}`);
-  suggest("Run `pebkac help` for available options.");
-}
-function quietLog(...items) { if (!quietMode) console.log(...items); }
-function verboseLog(...items) { if (verboseMode && !quietMode) console.log(dim(`  ${items.join(" ")}`)); }
-function suggest(msg) { console.error(dim(`  Suggestion: ${msg}`)); }
-function tableRow(statusIcon, labelText, valueText, width = 13) {
-  return `  ${statusIcon} ${labelText.padEnd(width)} ${valueText}`;
+function failUsage(message, suggestion) {
+  if (message) ui.error(message);
+  if (suggestion) ui.suggest(suggestion);
+  return EXIT.USAGE;
 }
 
-function optionValue(name, fallback = undefined) {
-  const index = args.indexOf(name);
-  if (index >= 0 && index + 1 < args.length) {
-    const val = args[index + 1];
-    if (val.startsWith("-")) {
-      console.error(`${red("Error:")} ${name} requires a value, got flag "${val}"`);
-      process.exit(2);
-    }
-    return val;
+function handleUnknownFlags() {
+  const flags = unknownFlags(args, KNOWN_FLAGS);
+  if (flags.length > 0) ui.error(`Unknown flag${flags.length > 1 ? "s" : ""}: ${flags.join(", ")}`);
+}
+
+function command() {
+  return args.find(a => !a.startsWith("-")) ?? (hasFlag(args, "--version", "-v") ? "version" : "help");
+}
+
+function helpCommand() {
+  const target = args.find((a, i) => i > 0 && !a.startsWith("-") && a !== "help");
+  if (target) {
+    const text = commandHelp(target);
+    if (!text) { ui.error(`Unknown command: ${target}`); return EXIT.ISSUE; }
+    ui.raw(text);
+    return EXIT.OK;
   }
-  return fallback;
+  ui.raw(groupedHelp(packageInfo().version));
+  return EXIT.OK;
 }
 
-function usage() {
-  return `PEBKAC Harness
-
-Usage:
-  pebkac init --non-interactive --yes [--cwd <path>]
-  pebkac status [--json] [--quiet] [-q] [--cwd <path>]
-  pebkac off [--cwd <path>]
-  pebkac on [--cwd <path>]
-  pebkac launch [--dry-run] [--quiet] [-q] [--cwd <path>]
-  pebkac doctor [--json] [--quiet] [-q] [--cwd <path>]
-  pebkac version [-q]
-  pebkac config get <key>
-  pebkac config set <key> <value>
-  pebkac completion <bash|zsh|fish>
-
-Init options:
-  --verbosity <full|normal|quiet>
-  --telemetry / --no-telemetry
-  --notifications / --no-notifications
-  --health-checks / --no-health-checks
-
-Global flags:
-  --json              Machine-readable JSON output (status, doctor)
-  --quiet, -q         Suppress all output; exit code only
-  --cwd <path>        Target project directory
-
-Exit codes: 0 = success/healthy, 1 = issues found, 2 = usage error
-`;
-}
-
-const COMMAND_HELP = {
-  init: `pebkac init [--non-interactive] [--yes] [--cwd <path>]
-
-Initialize PEBKAC harness in a project. Creates .harness/ config and
-installs the defense extension to .omp/extensions/.
-
-Options:
-  --non-interactive    Skip interactive prompts
-  --yes                Accept defaults for all prompts
-  --cwd <path>         Target project directory
-  --verbosity          Set verbosity (full|normal|quiet)
-  --telemetry/--no-telemetry     Enable/disable telemetry
-  --notifications/--no-notifications  Enable/disable notifications
-  --health-checks/--no-health-checks  Enable/disable health checks`,
-  status: `pebkac status [--json] [--quiet] [-q] [--verbose] [-V] [--cwd <path>]
-
-Show harness status: extension presence, config validity, disabled state.
-Exit code reflects health (0=healthy, 1=issues).
-
-Options:
-  --json       Machine-readable JSON output
-  --quiet, -q  Suppress output; exit code only
-  --verbose    Show file paths and raw config data`,
-  doctor: `pebkac doctor [--json] [--quiet] [-q] [--verbose] [-V] [--cwd <path>]
-
-Run diagnostic checks: extension, config, state dir, checkpoints, vault.
-Exit code reflects health (0=healthy, 1=issues found).
-
-Options:
-  --json       Machine-readable JSON output with check details
-  --quiet, -q  Suppress output; exit code only
-  --verbose    Show file paths and raw check data`,
-  off: `pebkac off [--cwd <path>]
-
-Disable PEBKAC harness for this project. Creates a sentinel file.
-Re-enable with: pebkac on`,
-  on: `pebkac on [--cwd <path>]
-
-Re-enable PEBKAC harness. Removes the disabled sentinel file.`,
-  launch: `pebkac launch [--dry-run] [--cwd <path>]
-
-Launch the configured agent runtime with PEBKAC defense loaded.
-
-Options:
-  --dry-run    Print the command without executing`,
-  version: `pebkac version [--quiet] [-q]
-
-Print PEBKAC version. Also available via --version or -v flags.`,
-  config: `pebkac config <get|set|list> [key] [value] [--cwd <path>]
-
-Manage .harness/config.yaml values.
-
-Subcommands:
-  get <key>    Read a config value (supports dot notation: defaults.verbosity)
-  set <key> <value>  Write a config value
-  list         Show full config`,
-  completion: `pebkac completion <bash|zsh|fish>
-
-Generate shell completion script. Add to your shell profile:
-  eval "$(pebkac completion bash)"
-  eval "$(pebkac completion zsh)"
-  pebkac completion fish | source`,
-};
-
-function boolFromFlags(enable, disable, fallback) {
-  if (hasFlag(disable)) return false;
-  if (hasFlag(enable)) return true;
-  return fallback;
-}
-
-function writeJson(path, value) {
-  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
-}
-
-function ensureProject(targetCwd) {
-  mkdirSync(join(targetCwd, ".omp", "extensions"), { recursive: true });
-  mkdirSync(join(targetCwd, ".harness", "state"), { recursive: true });
-  mkdirSync(join(targetCwd, ".harness", "checkpoints"), { recursive: true });
-  mkdirSync(join(targetCwd, ".harness", "vault"), { recursive: true });
-}
-
-function init() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const nonInteractive = hasFlag("--non-interactive") || hasFlag("--yes");
-
+function initCommand() {
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac init --non-interactive --yes --cwd ."); }
+  const nonInteractive = hasFlag(args, "--non-interactive", "--yes");
   if (!nonInteractive && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-    console.error("Interactive onboarding requires a TTY. Re-run with --non-interactive --yes to use explicit defaults.");
-    suggest("pebkac init --non-interactive --yes --cwd .");
-    process.exit(2);
+    ui.error("Interactive onboarding requires a TTY. Re-run with --non-interactive --yes.");
+    ui.suggest("pebkac init --non-interactive --yes --cwd .");
+    return EXIT.USAGE;
   }
-
-  ensureProject(targetCwd);
   const srcExt = join(repoRoot, ".omp", "extensions", "pebkac-defense.js");
   if (!existsSync(srcExt)) {
-    console.error(`${red("Error:")} Extension source not found: ${dim(srcExt)}`);
-    suggest("Re-clone the repository or check .omp/extensions/ directory.");
-    process.exit(1);
+    ui.error(`Extension source not found: ${srcExt}`);
+    ui.suggest("Re-clone the repository or restore .omp/extensions/pebkac-defense.js.");
+    return EXIT.ISSUE;
   }
-  copyFileSync(srcExt, join(targetCwd, ".omp", "extensions", "pebkac-defense.js"));
-
-  // Backward compat: --theme minimal maps to verbosity quiet
-  const themeFlag = optionValue("--theme", null);
-  let verbosity = optionValue("--verbosity", null);
-  if (themeFlag === "minimal" && !verbosity) verbosity = "quiet";
-  if (themeFlag === "standard" && !verbosity) verbosity = "full";
-  if (!verbosity) verbosity = "full";
-  if (!["full", "normal", "quiet"].includes(verbosity)) {
-    console.error(`Invalid verbosity: ${verbosity}. Must be full, normal, or quiet.`);
-    process.exit(1);
-  }
-  const theme = verbosity === "quiet" ? "minimal" : "standard";
-  const prefs = {
-    theme,
-    verbosity,
-    telemetry: boolFromFlags("--telemetry", "--no-telemetry", true),
-    notifications: boolFromFlags("--notifications", "--no-notifications", true),
-    healthChecks: boolFromFlags("--health-checks", "--no-health-checks", true),
-    capturedAt: new Date().toISOString(),
-  };
-
-  writeFileSync(join(targetCwd, ".harness", "config.yaml"), `# PEBKAC Harness Configuration
-version: "1.0"
-
-defaults:
-  evidence_required: true
-  deterministic_prompting: true
-  secrets_isolation: true
-  git_guard: true
-  checkpoint_interval: 10
-  verbosity: "${verbosity}"
-  enabled: ${boolFromFlags("--enabled", "--no-enabled", true)}
-
-# Agent runtime configuration
-# Set to "omp", "claude", or "none" for standalone mode
-agent_runtime: "omp"
-
-# Install defense extension to all platforms (omp, claude)
-platforms: all
-`);
-  writeJson(join(targetCwd, ".harness", "state", "onboarding-preferences.json"), prefs);
-  writeJson(join(targetCwd, ".harness", "state", "telemetry-consent.json"), { enabled: prefs.telemetry });
-  writeFileSync(join(targetCwd, ".harness", ".unboxed"), "true\n");
-
-  quietLog(header("PEBKAC init complete"));
-  quietLog(`  ${label("Path")}         ${dim(targetCwd)}`);
-  quietLog(`  ${label("Verbosity")}    ${verbosity}`);
-  quietLog(`  ${label("Telemetry")}    ${prefs.telemetry ? green("on") : red("off")}`);
-  quietLog(`  ${label("Notifications")} ${prefs.notifications ? green("on") : red("off")}`);
-  quietLog(`  ${label("Health checks")} ${prefs.healthChecks ? green("on") : red("off")}`);
-  quietLog("");
-  quietLog(dim("Next steps:"));
-  quietLog(dim(`  1. Review config: ${join(targetCwd, ".harness", "config.yaml")}`));
-  quietLog(dim(`  2. Launch session: pebkac launch --cwd ${targetCwd}`));
-  quietLog(dim(`  3. Check health:   pebkac doctor --cwd ${targetCwd}`));
+  ensureProject(cwd);
+  let verbosity;
+  try { verbosity = optionValue(args, "--verbosity", optionValue(args, "--theme", null) === "minimal" ? "quiet" : "full"); }
+  catch (err) { return failUsage(err.message, "pebkac init --verbosity full --cwd ."); }
+  if (!["full", "normal", "quiet"].includes(verbosity)) return failUsage("--verbosity must be full, normal, or quiet", "pebkac init --verbosity full --cwd .");
+  const enabled = boolFromFlags(args, "--enabled", "--no-enabled", true);
+  const telemetry = boolFromFlags(args, "--telemetry", "--no-telemetry", true);
+  const notifications = boolFromFlags(args, "--notifications", "--no-notifications", true);
+  const healthChecks = boolFromFlags(args, "--health-checks", "--no-health-checks", true);
+  const config = `# PEBKAC Harness Configuration\nversion: "1.0"\n\ndefaults:\n  evidence_required: true\n  deterministic_prompting: true\n  secrets_isolation: true\n  git_guard: true\n  checkpoint_interval: 10\n  turn_budget: 100\n  escalation_threshold: 5\n  verbosity: "${verbosity}"\n  enabled: ${enabled}\n\nagent_runtime: "omp"\nplatforms: all\n`;
+  writeFileSync(harnessPaths(cwd).config, config);
+  writeFileSync(join(harnessPaths(cwd).vault, "config.yaml"), `# PEBKAC Vault Configuration\nsecrets: {}\n`);
+  writeJson(harnessPaths(cwd).prefs, { theme: verbosity === "quiet" ? "minimal" : "standard", verbosity, telemetry, notifications, healthChecks, capturedAt: new Date().toISOString() });
+  writeJson(harnessPaths(cwd).telemetry, { enabled: telemetry });
+  writeJson(harnessPaths(cwd).flags, DEFAULT_FLAGS);
+  writeFileSync(join(harnessPaths(cwd).root, ".unboxed"), "true\n");
+  const platformResults = installPlatforms(cwd, repoRoot, "all");
+  const hookResult = installHooks(cwd);
+  const splash = maybeSplash(cwd, { force: true, quiet });
+  if (splash) ui.log(splash);
+  ui.log(ui.header("PEBKAC init complete"));
+  ui.log(`Verdict: ${ui.green("READY")} — project defenses are installed and the command surface is live.`);
+  ui.log(row("pass", "Path", ui.dim(cwd)));
+  ui.log(row("pass", "Verbosity", verbosity));
+  ui.log(row("pass", "Platforms", platformResults.map(r => `${r.platform}:${r.ok ? "ok" : "fail"}`).join(", ")));
+  ui.log(row(hookResult.ok ? "pass" : "warn", "Git hooks", hookResult.ok ? hookResult.installed.join(", ") : hookResult.reason));
+  ui.log("");
+  ui.log("Next steps:");
+  ui.log(`  1. Review config   ${join(cwd, ".harness", "config.yaml")}`);
+  ui.log(`  2. Launch session  pebkac launch --cwd ${cwd}`);
+  ui.log(`  3. Run diagnostics pebkac doctor --cwd ${cwd}`);
+  return platformResults.every(r => r.ok) ? EXIT.OK : EXIT.ISSUE;
 }
 
-function off() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const sentinelPath = join(targetCwd, ".harness", "state", "disabled");
-  mkdirSync(join(targetCwd, ".harness", "state"), { recursive: true });
-  writeFileSync(sentinelPath, `${new Date().toISOString()}\n`);
-  quietLog(`${yellow(label("DISABLED"))}  ${dim(targetCwd)}`);
-  quietLog(`  ${label("Sentinel")}   ${dim(sentinelPath)}`);
-  quietLog(`  ${label("Re-enable")}  pebkac on --cwd ${targetCwd}`);
-  quietLog(`  ${label("Per-session")} PEBKAC_OFF=1 <harness-command>`);
+function offCommand() {
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac off --cwd ."); }
+  ensureProject(cwd);
+  writeFileSync(harnessPaths(cwd).disabled, new Date().toISOString() + "\n");
+  ui.log(`${ui.icon("warn")} DISABLED ${ui.dim(cwd)}`);
+  ui.log(`  Re-enable: pebkac on --cwd ${cwd}`);
+  ui.log(`  Per-session: PEBKAC_OFF=1 <harness-command>`);
+  return EXIT.OK;
 }
 
-function on() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const sentinelPath = join(targetCwd, ".harness", "state", "disabled");
-  if (existsSync(sentinelPath)) {
-    try {
-      unlinkSync(sentinelPath);
-      quietLog(`${green(label("RE-ENABLED"))}  ${dim(targetCwd)}`);
-    } catch (err) {
-      console.error(`${red("Error:")} Could not remove sentinel: ${err.message}`);
-      process.exit(1);
-    }
+function onCommand() {
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac on --cwd ."); }
+  const sentinel = harnessPaths(cwd).disabled;
+  if (existsSync(sentinel)) {
+    unlinkSync(sentinel);
+    ui.log(`${ui.icon("pass")} RE-ENABLED ${ui.dim(cwd)}`);
   } else {
-    quietLog(`${icon("info")} PEBKAC already enabled for ${dim(targetCwd)}`);
+    ui.log(`${ui.icon("info")} PEBKAC already enabled for ${ui.dim(cwd)}`);
   }
+  return EXIT.OK;
 }
 
-function readFileSize(filePath) {
-  try {
-    const stat = statSync(filePath);
-    if (stat.size < 1024) return `${stat.size}B`;
-    if (stat.size < 1024 * 1024) return `${(stat.size / 1024).toFixed(1)}KB`;
-    return `${(stat.size / (1024 * 1024)).toFixed(1)}MB`;
-  } catch {
-    return "missing";
-  }
+function statusData(cwd) {
+  const p = harnessPaths(cwd);
+  const configText = readConfigText(cwd);
+  const configuredRuntime = readAgentRuntime(cwd);
+  const runtime = detectRuntime(configuredRuntime);
+  const platforms = platformStatus(cwd, "all");
+  const hooks = getHooksStatus(cwd);
+  const plugins = scanPlugins(cwd);
+  const extensionPath = join(cwd, ".omp", "extensions", "pebkac-defense.js");
+  const issues = [
+    !existsSync(extensionPath),
+    !existsSync(p.config),
+    !existsSync(p.state),
+    !existsSync(p.checkpoints),
+    !existsSync(p.vault),
+    !runtime.found,
+    platforms.some(x => !x.installed),
+  ].filter(Boolean).length;
+  return {
+    cwd,
+    healthy: issues === 0,
+    issues,
+    extension: { present: existsSync(extensionPath), size: fileSize(extensionPath), path: extensionPath },
+    config: { present: existsSync(p.config), valid: !!configText.includes("version:") && !!configText.includes("defaults:"), runtime: configuredRuntime, verbosity: yamlGet(configText, "defaults.verbosity") ?? "full", enabled: yamlGet(configText, "defaults.enabled") ?? "true" },
+    disabled: { active: existsSync(p.disabled) },
+    runtime,
+    platforms,
+    hooks,
+    plugins: { count: plugins.length, plugins },
+    checkpoints: { present: existsSync(p.checkpoints), count: listJsonFiles(p.checkpoints).length },
+    auditLog: { size: fileSize(p.audit), entries: lineCount(p.audit) },
+    flags: readJson(p.flags, DEFAULT_FLAGS) ?? DEFAULT_FLAGS,
+    checks: {
+      extension: { present: existsSync(extensionPath) },
+      config: { present: existsSync(p.config), valid: !!configText.includes("version:") && !!configText.includes("defaults:") },
+      stateDir: { present: existsSync(p.state) },
+      disabled: { active: existsSync(p.disabled) },
+      runtime: runtime,
+      checkpoints: { present: existsSync(p.checkpoints) },
+      vault: { present: existsSync(p.vault) },
+    },
+  };
 }
-
-function countLines(filePath) {
-  try {
-    const content = readFileSync(filePath, "utf8");
-    return content.split("\n").filter(Boolean).length;
-  } catch {
-    return 0;
-  }
-}
-
 
 function statusCommand() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const jsonMode = hasFlag("--json");
-  const extensionPath = join(targetCwd, ".omp", "extensions", "pebkac-defense.js");
-  const configPath = join(targetCwd, ".harness", "config.yaml");
-  const sentinelPath = join(targetCwd, ".harness", "state", "disabled");
-  const prefsPath = join(targetCwd, ".harness", "state", "onboarding-preferences.json");
-  const auditPath = join(targetCwd, ".harness", "audit.log");
-  let issues = 0;
-
-  // Extension
-  const extensionPresent = existsSync(extensionPath);
-  const extensionSize = extensionPresent ? readFileSize(extensionPath) : "missing";
-  if (!extensionPresent) issues++;
-
-  // Config
-  const configPresent = existsSync(configPath);
-  if (!configPresent) issues++;
-  let configRuntime = "unset", configVerbosity = "full", configEnabled = "true";
-  if (configPresent) {
-    try {
-      const configText = readFileSync(configPath, "utf8");
-      configRuntime = configText.match(/agent_runtime:\s*"?(\w+)"?/)?.[1] ?? "unset";
-      configVerbosity = configText.match(/verbosity:\s*"?(\w+)"?/)?.[1] ?? "full";
-      configEnabled = configText.match(/enabled:\s*(\w+)/)?.[1] ?? "true";
-    } catch {}
+  let data;
+  try { data = statusData(resolveCwd(args)); } catch (err) { return failUsage(err.message, "pebkac status --cwd ."); }
+  if (json) {
+    ui.raw(JSON.stringify(data, null, 2));
+    return data.healthy ? EXIT.OK : EXIT.ISSUE;
   }
-
-  // Disabled state
-  const isDisabled = existsSync(sentinelPath);
-
-  // Checkpoints
-  const cpDir = join(targetCwd, ".harness", "checkpoints");
-  const checkpoints = existsSync(cpDir) ? readdirSync(cpDir).filter(f => f.endsWith(".json")).length : 0;
-
-  // Audit log
-  const auditSize = existsSync(auditPath) ? readFileSize(auditPath) : "empty";
-  const auditEntries = existsSync(auditPath) ? countLines(auditPath) : 0;
-
-  // Preferences
-  let prefs = null;
-  if (existsSync(prefsPath)) {
-    try { prefs = JSON.parse(readFileSync(prefsPath, "utf8")); } catch {}
+  ui.log(ui.header("PEBKAC Status"));
+  ui.log(`Verdict: ${data.healthy ? ui.green("READY") : ui.yellow("ATTENTION NEEDED")} — ${data.issues === 0 ? "all required surfaces are present" : `${data.issues} setup issue${data.issues === 1 ? "" : "s"} detected`}.`);
+  ui.log(row(data.extension.present ? "pass" : "fail", "Extension", data.extension.present ? `present ${data.extension.size}` : "missing"));
+  ui.log(row(data.config.present ? "pass" : "fail", "Config", data.config.present ? `present runtime=${data.config.runtime}, verbosity=${data.config.verbosity}, enabled=${data.config.enabled}` : "missing"));
+  ui.log(row(data.disabled.active ? "warn" : "pass", "Disabled", data.disabled.active ? "YES — sentinel file present" : "no"));
+  ui.log(row(data.runtime.found ? "pass" : "fail", "Runtime", data.runtime.found ? `${data.runtime.name} ${ui.dim(data.runtime.path ?? "")}` : `${data.runtime.name} NOT FOUND`));
+  ui.log(row(data.platforms.every(p => p.installed) ? "pass" : "fail", "Platforms", data.platforms.map(p => `${p.platform}:${p.installed ? "ok" : "missing"}`).join(", ")));
+  ui.log(row(data.hooks.ok || data.hooks.reason === "not a git repository" ? "pass" : "warn", "Git hooks", data.hooks.reason ?? data.hooks.hooks.map(h => `${h.name}:${h.installed && !h.drifted ? "ok" : "issue"}`).join(", ")));
+  ui.log(row("info", "Plugins", String(data.plugins.count)));
+  ui.log(row("info", "Checkpoints", String(data.checkpoints.count)));
+  ui.log(row("info", "Audit", `${data.auditLog.size} (${data.auditLog.entries} entries)`));
+  if (verbose) {
+    ui.log("");
+    ui.log("Verbose:");
+    ui.log(`  extension: ${data.extension.path}`);
+    ui.log(`  config: ${harnessPaths(data.cwd).config}`);
+    ui.log(`  cwd: ${data.cwd}`);
+    ui.log(`  hooks: ${JSON.stringify(data.hooks)}`);
+    ui.log(JSON.stringify(data, null, 2));
   }
-
-  // Runtime
-  const runtime = detectRuntime();
-  if (!runtime.found) issues++;
-
-  // Session reports
-  const reportsDir = join(targetCwd, ".harness", "state");
-  const reports = existsSync(reportsDir) ? readdirSync(reportsDir).filter(f => f.startsWith("session-report")).length : 0;
-
-  // Health check
-  let healthTime = null;
-  const healthPath = join(targetCwd, ".harness", "state", "session-health.json");
-  if (existsSync(healthPath)) {
-    try { healthTime = JSON.parse(readFileSync(healthPath, "utf8")).startTime ?? null; } catch {}
-  }
-
-  if (jsonMode) {
-    const output = {
-      cwd: targetCwd,
-      healthy: issues === 0,
-      issues,
-      extension: { present: extensionPresent, size: extensionSize },
-      config: { present: configPresent, runtime: configRuntime, verbosity: configVerbosity, enabled: configEnabled },
-      disabled: isDisabled,
-      checkpoints,
-      auditLog: { size: auditSize, entries: auditEntries },
-      preferences: prefs ? { verbosity: prefs.verbosity ?? prefs.theme ?? "full", notifications: !!prefs.notifications, telemetry: !!prefs.telemetry } : null,
-      runtime: { name: runtime.name, found: runtime.found, path: runtime.path },
-      sessionReports: reports,
-      lastHealthCheck: healthTime,
-    };
-    console.log(JSON.stringify(output, null, 2));
-    if (issues > 0) process.exit(1);
-    return;
-  }
-  // Table-formatted output
-  quietLog(header("PEBKAC Harness Status"));
-  quietLog(dim("─".repeat(40)));
-  quietLog(tableRow(extensionPresent ? icon("pass") : icon("fail"), label("Extension"), extensionPresent ? green(extensionSize) : red("MISSING")));
-  quietLog(tableRow(configPresent ? icon("pass") : icon("fail"), label("Config"), configPresent ? green("present") : red("MISSING")));
-  if (configPresent) {
-    quietLog(tableRow(icon("info"), label("Runtime"), configRuntime));
-    quietLog(tableRow(icon("info"), label("Verbosity"), configVerbosity));
-    quietLog(tableRow(icon("info"), label("Enabled"), configEnabled));
-  }
-  quietLog(tableRow(isDisabled ? icon("warn") : icon("pass"), label("Disabled"), isDisabled ? yellow("YES — sentinel file present") : green("no")));
-  quietLog(tableRow(icon("info"), label("Checkpoints"), `${checkpoints} file${checkpoints !== 1 ? "s" : ""}`));
-  quietLog(tableRow(icon("info"), label("Audit log"), `${auditSize} (${auditEntries} entries)`));
-  if (prefs) quietLog(tableRow(icon("info"), label("Prefs"), `verbosity=${prefs.verbosity ?? prefs.theme ?? "full"}, notifications=${prefs.notifications ? green("on") : red("off")}, telemetry=${prefs.telemetry ? green("on") : red("off")}`));
-  quietLog(tableRow(runtime.found ? icon("pass") : icon("fail"), label("Runtime"), runtime.found ? green(`${runtime.name} — ${runtime.path}`) : red(`${runtime.name} — NOT FOUND`)));
-  if (reports > 0) quietLog(tableRow(icon("info"), label("Reports"), `${reports} session report${reports !== 1 ? "s" : ""}`));
-  if (healthTime) quietLog(tableRow(icon("info"), label("Health"), healthTime));
-  // Verbose diagnostics
-  if (verboseMode) {
-    quietLog("");
-    quietLog(dim("── Verbose ──"));
-    verboseLog(`extension: ${extensionPath}`);
-    verboseLog(`config: ${configPath}`);
-    verboseLog(`sentinel: ${sentinelPath} ${isDisabled ? "(present)" : "(absent)"}`);
-    verboseLog(`preferences: ${prefsPath}`);
-    verboseLog(`audit: ${auditPath}`);
-    verboseLog(`checkpoints: ${cpDir}`);
-    verboseLog(`health: ${healthPath}`);
-    verboseLog(`cwd: ${targetCwd}`);
-    if (prefs) verboseLog(`raw prefs: ${JSON.stringify(prefs)}`);
-  }
-  quietLog("");
-  if (issues > 0) {
-    quietLog(`${icon("fail")} ${red(`${issues} issue${issues !== 1 ? "s" : ""} found`)}`);
-    quietLog(dim(`  Run "pebkac doctor" for detailed diagnostics.`));
-    process.exit(1);
-  } else {
-    quietLog(`${icon("pass")} ${green("All checks passed")}`);
-  }
-}
-
-function detectRuntime() {
-  const runtimes = [
-    { name: "omp", cmd: "omp" },
-    { name: "claude", cmd: "claude" },
-  ];
-  for (const rt of runtimes) {
-    const result = spawnSync("which", [rt.cmd], { encoding: "utf8" });
-    if (result.status === 0 && result.stdout.trim()) {
-      return { name: rt.name, found: true, path: result.stdout.trim() };
-    }
-  }
-  // Check first runtime as default
-  return { name: runtimes[0].name, found: false, path: null };
-}
-
-function readAgentRuntime(cwd) {
-  const configPath = join(cwd, ".harness", "config.yaml");
-  try {
-    const configText = readFileSync(configPath, "utf8");
-    const match = configText.match(/agent_runtime:\s*"?(\w+)"?/);
-    return match?.[1] ?? "omp";
-  } catch {
-    return "omp";
-  }
-}
-
-function launchCommand() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const dryRun = hasFlag("--dry-run");
-  const runtime = readAgentRuntime(targetCwd);
-
-  if (runtime === "none") {
-    quietLog(`${icon("info")} Standalone mode ${dim("(agent_runtime: none)")}. No harness to launch.`);
-    return;
-  }
-
-  const runtimeInfo = detectRuntime();
-  const cmd = runtime === "claude" ? "claude" : "omp";
-
-  if (dryRun) {
-    quietLog(header("Dry run"));
-    quietLog(`  ${label("Command")}  ${cmd} --cwd ${targetCwd}`);
-    quietLog(`  ${label("Runtime")}  ${runtimeInfo.found ? green(runtimeInfo.path) : red("NOT FOUND")}`);
-    quietLog(dim("  Remove --dry-run to execute."));
-    return;
-  }
-
-  if (!runtimeInfo.found) {
-    console.error(`${icon("fail")} ${red(`Runtime "${cmd}" not found on PATH`)}`);
-    console.error(dim(`  Run "pebkac doctor" for diagnostics.`));
-    process.exit(1);
-  }
-
-  quietLog(`${icon("info")} Launching ${green(cmd)} in ${dim(targetCwd)}...`);
-  const result = spawnSync(cmd, ["--cwd", targetCwd], { stdio: "inherit", cwd: targetCwd });
-  process.exit(result.status ?? 1);
+  return data.healthy ? EXIT.OK : EXIT.ISSUE;
 }
 
 function doctorCommand() {
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const jsonMode = hasFlag("--json");
-  const checks = {};
-  let issues = 0;
-
-  // Check 1: Extension file
-  const extensionPath = join(targetCwd, ".omp", "extensions", "pebkac-defense.js");
-  checks.extension = { present: existsSync(extensionPath), size: existsSync(extensionPath) ? readFileSize(extensionPath) : null };
-  if (!checks.extension.present) issues++;
-
-  // Check 2: Config file
-  const configPath = join(targetCwd, ".harness", "config.yaml");
-  checks.config = { present: existsSync(configPath), valid: false };
-  if (existsSync(configPath)) {
-    try {
-      const text = readFileSync(configPath, "utf8");
-      checks.config.valid = text.includes("version:") && text.includes("defaults:");
-      if (!checks.config.valid) issues++;
-    } catch { issues++; }
-  } else { issues++; }
-
-  // Check 3: State directory
-  const stateDir = join(targetCwd, ".harness", "state");
-  checks.stateDir = { present: existsSync(stateDir) };
-  if (!checks.stateDir.present) issues++;
-
-  // Check 4: Sentinel file
-  const sentinelPath = join(targetCwd, ".harness", "state", "disabled");
-  checks.disabled = { active: existsSync(sentinelPath), since: null };
-  if (existsSync(sentinelPath)) {
-    try { checks.disabled.since = readFileSync(sentinelPath, "utf8").trim(); } catch {}
-    issues++;
+  let data;
+  try { data = statusData(resolveCwd(args)); } catch (err) { return failUsage(err.message, "pebkac doctor --cwd ."); }
+  const checks = {
+    extension: data.checks.extension,
+    config: data.checks.config,
+    stateDir: data.checks.stateDir,
+    disabled: data.checks.disabled,
+    runtime: data.runtime,
+    checkpoints: data.checks.checkpoints,
+    vault: data.checks.vault,
+    hooks: { ok: data.hooks.ok || data.hooks.reason === "not a git repository", reason: data.hooks.reason },
+    flags: { present: existsSync(harnessPaths(data.cwd).flags) },
+    platforms: { ok: data.platforms.every(p => p.installed) },
+  };
+  const fixes = {
+    extension: "pebkac init --non-interactive --yes",
+    config: "pebkac init --non-interactive --yes",
+    stateDir: "pebkac init --non-interactive --yes",
+    disabled: "pebkac on --cwd .",
+    runtime: `install ${data.runtime.name} or set agent_runtime: none`,
+    checkpoints: "pebkac init --non-interactive --yes",
+    vault: "pebkac init --non-interactive --yes",
+    hooks: "pebkac hooks install",
+    flags: "pebkac flags list",
+    platforms: "pebkac platforms install all",
+  };
+  const healthy = checks.extension.present && checks.config.present && checks.config.valid && checks.stateDir.present && !checks.disabled.active && checks.runtime.found && checks.checkpoints.present && checks.vault.present && checks.flags.present && checks.platforms.ok && checks.hooks.ok;
+  const result = { healthy, issues: healthy ? 0 : 1, checks };
+  if (json) {
+    ui.raw(JSON.stringify(result, null, 2));
+    return healthy ? EXIT.OK : EXIT.ISSUE;
   }
-
-  // Check 5: Runtime binary — check the CONFIGURED runtime, not just any on PATH
-  const configuredRuntime = readAgentRuntime(targetCwd);
-  checks.runtime = { configured: configuredRuntime, found: false, path: null };
-  if (configuredRuntime === "none") {
-    checks.runtime.found = true;
-  } else {
-    const result = spawnSync("which", [configuredRuntime], { encoding: "utf8" });
-    checks.runtime.found = result.status === 0 && !!result.stdout.trim();
-    checks.runtime.path = checks.runtime.found ? result.stdout.trim() : null;
-    if (!checks.runtime.found) issues++;
+  ui.log(ui.header("PEBKAC Doctor"));
+  ui.log(`Verdict: ${healthy ? ui.green("READY") : ui.yellow("REMEDIATION REQUIRED")} — ${healthy ? "all required checks passed" : "one or more required defenses are missing or drifted"}.`);
+  ui.log(row(checks.extension.present ? "pass" : "fail", "extension", checks.extension.present ? "ok" : fixes.extension));
+  ui.log(row(checks.config.present && checks.config.valid ? "pass" : "fail", "config", checks.config.present && checks.config.valid ? "ok" : fixes.config));
+  ui.log(row(checks.runtime.found ? "pass" : "fail", "runtime", checks.runtime.found ? `ok (${checks.runtime.configured})` : fixes.runtime));
+  ui.log(row(checks.platforms.ok ? "pass" : "fail", "platforms", checks.platforms.ok ? "ok" : fixes.platforms));
+  ui.log(row(checks.hooks.ok ? "pass" : "fail", "git-hooks", checks.hooks.ok ? "ok" : fixes.hooks));
+  ui.log(row(checks.vault.present ? "pass" : "fail", "vault", checks.vault.present ? "ok" : fixes.vault));
+  ui.log(row(checks.flags.present ? "pass" : "fail", "flags", checks.flags.present ? "ok" : fixes.flags));
+  if (!healthy) {
+    ui.log("");
+    ui.log("Next actions:");
+    if (!checks.extension.present || !checks.config.present || !checks.config.valid || !checks.stateDir.present || !checks.checkpoints.present || !checks.vault.present || !checks.flags.present) ui.log("  1. Re-run bootstrap: pebkac init --non-interactive --yes --cwd .");
+    if (checks.disabled.active) ui.log("  2. Re-enable project: pebkac on --cwd .");
+    if (!checks.platforms.ok) ui.log("  3. Reinstall surfaces: pebkac platforms install all --cwd .");
+    if (!checks.hooks.ok && checks.hooks.reason !== "not a git repository") ui.log("  4. Repair git hooks: pebkac hooks install --cwd .");
+    if (!checks.runtime.found) ui.log(`  5. Fix runtime: ${fixes.runtime}`);
   }
-
-  // Check 6: Checkpoints directory
-  const cpDir = join(targetCwd, ".harness", "checkpoints");
-  checks.checkpoints = { present: existsSync(cpDir) };
-  if (!checks.checkpoints.present) issues++;
-
-  // Check 7: Vault directory
-  const vaultDir = join(targetCwd, ".harness", "vault");
-  checks.vault = { present: existsSync(vaultDir) };
-  if (!checks.vault.present) issues++;
-
-  if (jsonMode) {
-    console.log(JSON.stringify({ cwd: targetCwd, healthy: issues === 0, issues, checks }, null, 2));
-    if (issues > 0) process.exit(1);
-    return;
+  if (verbose) {
+    ui.log("");
+    ui.log("Verbose:");
+    ui.log(`  checks: ${JSON.stringify(checks)}`);
+    ui.log(`  cwd: ${data.cwd}`);
   }
-
-  // Table-formatted output
-  quietLog(header("PEBKAC Doctor"));
-  quietLog(dim("═".repeat(40)));
-  quietLog(tableRow(checks.extension.present ? icon("pass") : icon("fail"), label("Extension"), checks.extension.present ? green(`present ${dim(`(${checks.extension.size})`)}`) : red("MISSING")));
-  if (!checks.extension.present) quietLog(`  ${dim(`Fix: pebkac init --non-interactive --yes --cwd ${targetCwd}`)}`);
-  if (checks.config.present && checks.config.valid) {
-    quietLog(tableRow(icon("pass"), label("Config"), green("present and valid")));
-  } else if (checks.config.present) {
-    quietLog(tableRow(icon("fail"), label("Config"), red("missing required sections")));
-  } else {
-    quietLog(tableRow(icon("fail"), label("Config"), red("MISSING")));
-    quietLog(`  ${dim(`Fix: pebkac init --non-interactive --yes --cwd ${targetCwd}`)}`);
-  }
-  quietLog(tableRow(checks.stateDir.present ? icon("pass") : icon("fail"), label("State"), checks.stateDir.present ? green("directory exists") : red("MISSING")));
-  if (!checks.stateDir.present) quietLog(`  ${dim(`Fix: pebkac init --non-interactive --yes --cwd ${targetCwd}`)}`);
-  if (checks.disabled.active) {
-    quietLog(tableRow(icon("warn"), label("Disabled"), yellow(`YES — since ${checks.disabled.since}`)));
-    quietLog(`  ${dim(`Fix: pebkac on --cwd ${targetCwd}`)}`);
-  } else {
-    quietLog(tableRow(icon("pass"), label("Disabled"), green("not disabled")));
-  }
-  if (checks.runtime.found) {
-    quietLog(tableRow(icon("pass"), label("Runtime"), `${green(checks.runtime.name)} ${checks.runtime.path ? dim(checks.runtime.path) : ""}`));
-  } else {
-    quietLog(tableRow(icon("fail"), label("Runtime"), red(`"${checks.runtime.name}" NOT FOUND on PATH`)));
-    quietLog(`  ${dim(`Fix: Install ${checks.runtime.name} and ensure it's on PATH`)}`);
-  }
-  quietLog(tableRow(checks.checkpoints.present ? icon("pass") : icon("fail"), label("Checkpoints"), checks.checkpoints.present ? green("directory exists") : red("MISSING")));
-  quietLog(tableRow(checks.vault.present ? icon("pass") : icon("fail"), label("Vault"), checks.vault.present ? green("directory exists") : red("MISSING")));
-  // Verbose diagnostics
-  if (verboseMode) {
-    quietLog("");
-    quietLog(dim("── Verbose ──"));
-    verboseLog(`extension: ${join(targetCwd, ".omp", "extensions", "pebkac-defense.js")}`);
-    verboseLog(`config: ${join(targetCwd, ".harness", "config.yaml")}`);
-    verboseLog(`state: ${join(targetCwd, ".harness", "state")}`);
-    verboseLog(`checkpoints: ${join(targetCwd, ".harness", "checkpoints")}`);
-    verboseLog(`vault: ${join(targetCwd, ".harness", "vault")}`);
-    verboseLog(`cwd: ${targetCwd}`);
-    verboseLog(`checks: ${JSON.stringify(checks)}`);
-  }
-  quietLog("");
-  if (issues === 0) {
-    quietLog(`${icon("pass")} ${green("All checks passed. PEBKAC is healthy.")}`);
-  } else {
-    quietLog(`${icon("fail")} ${red(`${issues} issue${issues !== 1 ? "s" : ""} found.`)} ${dim("Fix the items above.")}`);
-    process.exit(1);
-  }
+  return healthy ? EXIT.OK : EXIT.ISSUE;
 }
 
-function versionCommand() {
-  try {
-    const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
-    quietLog(`${header("PEBKAC")} ${green(pkg.version ?? "unknown")} ${dim(`(${pkg.name})`)}`);
-  } catch {
-    quietLog(`${header("PEBKAC")} ${dim("version unknown")}`);
+function launchCommand() {
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac launch --cwd ."); }
+  const runtimeName = readAgentRuntime(cwd);
+  if (runtimeName === "none") { ui.log(`${ui.icon("info")} Standalone mode (agent_runtime: none). No harness to launch.`); return EXIT.OK; }
+  const runtime = detectRuntime(runtimeName);
+  const cmd = runtime.name;
+  if (hasFlag(args, "--dry-run")) {
+    ui.log(`Command: ${cmd} --cwd ${cwd} --dry-run`);
+    ui.log(`Runtime: ${runtime.found ? runtime.path : "NOT FOUND"}`);
+    ui.log("Remove --dry-run to execute.");
+    return runtime.found ? EXIT.OK : EXIT.ISSUE;
   }
+  if (!runtime.found) { ui.error(`Runtime ${cmd} not found on PATH`); ui.suggest("Run `pebkac doctor` for diagnostics."); return EXIT.ISSUE; }
+  const r = spawnSync(cmd, ["--cwd", cwd], { stdio: "inherit", cwd });
+  return r.status ?? EXIT.ISSUE;
 }
 
 function configCommand() {
-  const sub = args[args.indexOf("config") + 1];
-  const targetCwd = resolve(optionValue("--cwd", process.cwd()));
-  const configPath = join(targetCwd, ".harness", "config.yaml");
-
-  if (!existsSync(configPath)) {
-    console.error(`${red("No config found.")} Run ${dim("pebkac init")} first.`);
-    process.exit(1);
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac config get agent_runtime --cwd ."); }
+  const configIdx = args.indexOf("config");
+  const FLAG_VALS = new Set(["--cwd", "--limit", "--verbosity", "--theme", "--key-from-env"]);
+  const positionals = [];
+  for (let i = configIdx + 1; i < args.length; i++) {
+    if (args[i].startsWith("--")) { if (FLAG_VALS.has(args[i])) i++; continue; }
+    positionals.push(args[i]);
   }
-
-  const configText = readFileSync(configPath, "utf8");
-
-  // Simple YAML value reader — handles key: value and quoted strings
-  function getYamlValue(text, key) {
-    // Support dot-notation: "defaults.evidence_required" → section=defaults, leaf=evidence_required
-    const parts = key.split(".");
-    if (parts.length === 2) {
-      const sectionRe = new RegExp(`^${parts[0]}:\\s*$`, "m");
-      const sectionMatch = sectionRe.exec(text);
-      if (!sectionMatch) return undefined;
-      const afterSection = text.slice(sectionMatch.index);
-      const nextSection = afterSection.indexOf("\n\n");
-      const block = nextSection > 0 ? afterSection.slice(0, nextSection) : afterSection;
-      const leafRe = new RegExp(`^\\s+${parts[1]}:\\s*(.+)$`, "m");
-      // Filter out commented lines from matches
-      const lines = block.split("\n").filter(l => !l.trim().startsWith("#"));
-      const filteredBlock = lines.join("\n");
-      const m2 = leafRe.exec(filteredBlock);
-      return m2 ? m2[1].replace(/^["']|["']$/g, "").trim() : undefined;
-    }
-    const re = new RegExp(`^${parts[0]}:\\s*(.+)$`, "m");
-    const m = re.exec(text);
-    return m ? m[1].replace(/^["']|["']$/g, "").trim() : undefined;
+  const sub = positionals[0] ?? "list";
+  const key = positionals[1];
+  const value = positionals[2];
+  const text = readConfigText(cwd);
+  if (!text) { ui.error("No config found. Run pebkac init first."); ui.suggest("pebkac init --non-interactive --yes --cwd ."); return EXIT.ISSUE; }
+  if (sub === "list") {
+    if (json) { ui.raw(JSON.stringify({ path: harnessPaths(cwd).config, keys: { "agent_runtime": yamlGet(text, "agent_runtime") ?? "omp", "defaults.verbosity": yamlGet(text, "defaults.verbosity") ?? "full", "defaults.enabled": yamlGet(text, "defaults.enabled") ?? "true" }, raw: text.trimEnd() }, null, 2)); return EXIT.OK; }
+    ui.log(ui.header("Config"));
+    ui.log(`Verdict: ${ui.green("READY")} — configuration file is present and readable.`);
+    ui.log(row("pass", "Path", ui.dim(harnessPaths(cwd).config)));
+    ui.log(row("info", "agent_runtime", yamlGet(text, "agent_runtime") ?? "omp"));
+    ui.log(row("info", "verbosity", yamlGet(text, "defaults.verbosity") ?? "full"));
+    ui.log(row("info", "enabled", yamlGet(text, "defaults.enabled") ?? "true"));
+    return EXIT.OK;
   }
-
-  function setYamlValue(text, key, value) {
-    const parts = key.split(".");
-    if (parts.length === 2) {
-      const re = new RegExp(`^(\\s+${parts[1]}:\\s*).+$`, "m");
-      if (re.test(text)) return text.replace(re, `$1${value}`);
-      // Key doesn't exist yet — append under section
-      const sectionRe = new RegExp(`^(${parts[0]}:\\s*\\n)`, "m");
-      return text.replace(sectionRe, `$1  ${parts[1]}: ${value}\n`);
-    }
-    const re = new RegExp(`^(${parts[0]}:\\s*).+$`, "m");
-    if (re.test(text)) return text.replace(re, `$1${value}`);
-    // Append at end
-    return text.trimEnd() + `\n${parts[0]}: ${value}\n`;
-  }
-
   if (sub === "get") {
-    const key = args[args.indexOf("get") + 1];
-    if (!key) {
-      console.error(red("Usage: pebkac config get <key>"));
-      console.error(dim("  Keys: agent_runtime, verbosity, enabled, defaults.evidence_required, defaults.git_guard, defaults.secrets_isolation"));
-      process.exit(2);
-    }
-    const val = getYamlValue(configText, key);
-    if (val === undefined) {
-      console.error(red(`Key "${key}" not found in config`));
-      suggest("pebkac config list --cwd . to see all available keys");
-      process.exit(1);
-    }
-    quietLog(val);
-  } else if (sub === "set") {
-    const key = args[args.indexOf("set") + 1];
-    const value = args[args.indexOf("set") + 2];
-    if (!key || !value) {
-      console.error(red("Usage: pebkac config set <key> <value>"));
-      process.exit(2);
-    }
-    const quoted = value.match(/[^a-zA-Z0-9_.\-]/) ? `"${value}"` : value;
-    const updated = setYamlValue(configText, key, quoted);
-    writeFileSync(configPath, updated);
-    quietLog(`${icon("pass")} ${green(key)} set to ${green(quoted)}`);
-  } else if (sub === "list") {
-    quietLog(configText.trimEnd());
-  } else {
-    console.error(red(`Unknown config subcommand: ${sub ?? "(none)"}`));
-    console.error(dim("  Usage: pebkac config <get|set|list> [key] [value]"));
-    process.exit(2);
+    if (!key) return failUsage("Usage: pebkac config get <key>", "pebkac config list --cwd .");
+    const v = yamlGet(text, key);
+    if (v === undefined) { ui.error(`Key not found: ${key}`); ui.suggest("pebkac config list --cwd ."); return EXIT.ISSUE; }
+    if (json) { ui.raw(JSON.stringify({ key, value: v, path: harnessPaths(cwd).config }, null, 2)); return EXIT.OK; }
+    ui.log(ui.header("Config value"));
+    ui.log(`Verdict: ${ui.green("READY")} — requested key resolved.`);
+    ui.log(row("pass", "Key", key));
+    ui.log(row("info", "Value", String(v)));
+    return EXIT.OK;
   }
+  if (sub === "set") {
+    if (!key || value === undefined) return failUsage("Usage: pebkac config set <key> <value>", "pebkac config set agent_runtime claude --cwd .");
+    writeFileSync(harnessPaths(cwd).config, yamlSet(text, key, value));
+    ui.log(ui.header("Config updated"));
+    ui.log(`Verdict: ${ui.green("READY")} — configuration value written successfully.`);
+    ui.log(row("pass", "Key", key));
+    ui.log(row("info", "Value", String(value)));
+    return EXIT.OK;
+  }
+  return failUsage(`Unknown config subcommand: ${sub}`, "pebkac config <get|set|list> [key] [value]");
 }
 
-const command = args.find((arg) => !arg.startsWith("-")) ?? "help";
 function completionCommand() {
   const shell = args[args.indexOf("completion") + 1];
-  const commands = ["init", "status", "off", "on", "launch", "doctor", "version", "config"];
-  const configSubs = ["get", "set", "list"];
-  const globalFlags = ["--json", "--quiet", "-q", "--cwd", "--dry-run", "--non-interactive", "--yes", "--help"];
-
-  if (!shell || !["bash", "zsh", "fish"].includes(shell)) {
-    console.error(red("Usage: pebkac completion <bash|zsh|fish>"));
-    console.error(dim("  Add to your shell: eval \"$(pebkac completion bash)\""));
-    process.exit(2);
-  }
-
+  const commands = "help init status off on launch doctor version config completion api-keys hooks platforms plugins flags audit mode skill";
   if (shell === "bash") {
-    quietLog(`# pebkac bash completion
-_pebkac_completions() {
-  local cur="\${COMP_WORDS[COMP_CWORD]}"
-  local prev="\${COMP_WORDS[COMP_CWORD-1]}"
-  local commands="${commands.join(" ")}"
-  local flags="${globalFlags.join(" ")}"
-
-  if [ "\$COMP_CWORD" -eq 1 ]; then
-    COMPREPLY=($(compgen -W "\$commands" -- "\$cur"))
-  elif [ "\$prev" = "config" ]; then
-    COMPREPLY=($(compgen -W "get set list" -- "\$cur"))
-  elif [ "\$prev" = "get" ] || [ "\$prev" = "set" ]; then
-    COMPREPLY=($(compgen -W "agent_runtime verbosity enabled defaults.evidence_required defaults.git_guard defaults.secrets_isolation defaults.checkpoint_interval defaults.deterministic_prompting defaults.verbosity" -- "\$cur"))
-  elif [ "\$prev" = "--cwd" ]; then
-    COMPREPLY=($(compgen -d -- "\$cur"))
-  else
-    COMPREPLY=($(compgen -W "\$flags" -- "\$cur"))
-  fi
-}
-complete -F _pebkac_completions pebkac`);
-  } else if (shell === "zsh") {
-    quietLog(`#compdef pebkac
-# pebkac zsh completion
-_pebkac() {
-  local -a commands config_subs flags
-  commands=(${commands.map(c => `"${c}:PEBKAC ${c} command"`).join("\n    ")})
-  config_subs=("get:Get a config value" "set:Set a config value" "list:Show full config")
-  flags=(${globalFlags.map(f => `"${f}"`).join(" ")})
-
-  _arguments -C \\
-    "1:command:->command" \\
-    "2:subcommand:->subcommand" \\
-    "*::arg:->arg"
-
-  case \$state in
-    command) _describe "command" commands ;;
-    subcommand)
-      case \$words[1] in
-        config) _describe "subcommand" config_subs ;;
-      esac ;;
-    arg)
-      case \$words[2] in
-        set|get) _describe "key" "agent_runtime verbosity enabled defaults.evidence_required defaults.git_guard defaults.secrets_isolation defaults.checkpoint_interval" ;;
-      esac ;;
-  esac
-}
-_pebkac "\$@"`);
-  } else if (shell === "fish") {
-    quietLog(`# pebkac fish completion
-set -l commands ${commands.join(" ")}
-set -l config_subs get set list
-set -l config_keys agent_runtime verbosity enabled defaults.evidence_required defaults.git_guard defaults.secrets_isolation defaults.checkpoint_interval
-
-complete -c pebkac -n "__fish_use_subcommand" -a "$commands"
-complete -c pebkac -n "__fish_seen_subcommand_from config" -a "$config_subs"
-complete -c pebkac -n "__fish_seen_subcommand_from config; and __fish_seen_subcommand_from get set" -a "$config_keys"
-complete -c pebkac -s q -l quiet -d "Suppress all output"
-complete -c pebkac -l json -d "Machine-readable JSON output"
-complete -c pebkac -l cwd -x -a "(__fish_complete_directories)" -d "Target directory"
-complete -c pebkac -l dry-run -d "Show command without executing"
-complete -c pebkac -l non-interactive -d "Skip interactive prompts"
-complete -c pebkac -l yes -d "Use defaults"`);
+    ui.raw(`# PEBKAC bash completion\n# Install: eval \"$(pebkac completion bash)\"\n_pebkac_completions(){\n  local cur=\"\${COMP_WORDS[COMP_CWORD]}\"\n  local commands=\"${commands}\"\n  local config_subs=\"get set list\"\n  COMPREPLY=($(compgen -W \"\\$commands\" -- \"\\$cur\"))\n}\ncomplete -F _pebkac_completions pebkac`);
+    return EXIT.OK;
   }
+  if (shell === "zsh") {
+    ui.raw(`#compdef pebkac\n# Install: eval \"$(pebkac completion zsh)\"\n_pebkac(){\n  local -a commands\n  commands=(${commands.split(" ").map(c => `"${c}:${c}"`).join(" ")})\n  _describe "command" commands\n}\n_pebkac "$@"`);
+    return EXIT.OK;
+  }
+  if (shell === "fish") {
+    ui.raw(`# PEBKAC fish completion\n# Install: pebkac completion fish | source\nset -l commands ${commands}\nset -l config_subs get set list\ncomplete -c pebkac -n "__fish_use_subcommand" -a "$commands"\ncomplete -c pebkac -n "__fish_seen_subcommand_from config" -a "$config_subs"`);
+    return EXIT.OK;
+  }
+  ui.error("Usage: pebkac completion <bash|zsh|fish>");
+  ui.suggest('eval "$(pebkac completion bash)"');
+  return EXIT.USAGE;
 }
 
-try {
-  if (command === "init") init();
-  else if (command === "status") statusCommand();
-  else if (command === "off") off();
-  else if (command === "on") on();
-  else if (command === "launch") launchCommand();
-  else if (command === "doctor") doctorCommand();
-  else if (command === "version" || hasFlag("--version") || hasFlag("-v")) versionCommand();
-  else if (command === "config") configCommand();
-  else if (command === "completion") completionCommand();
-  else if (command === "help") {
-    const helpTarget = args.find((a, i) => i > 0 && !a.startsWith("-") && a !== "help");
-    if (helpTarget && COMMAND_HELP[helpTarget]) {
-      quietLog(COMMAND_HELP[helpTarget]);
-      process.exit(0);
-    } else if (helpTarget) {
-      console.error(red(`Unknown command: ${helpTarget}`));
-      suggest("Run `pebkac help` for available commands.");
-      process.exit(1);
-    }
-    quietLog(usage());
-    process.exit(0);
-  }
-  else {
-    quietLog(usage());
-    process.exit(1);
-  }
-} catch (err) {
-  console.error(`${red("Error:")} ${err.message}`);
-  suggest("Run `pebkac doctor` for diagnostics.");
-  process.exit(1);
+async function main() {
+  handleUnknownFlags();
+  const cmd = command();
+  if (hasFlag(args, "--help", "-h") && cmd !== "help") { ui.raw(commandHelp(cmd) ?? groupedHelp(packageInfo().version)); return EXIT.OK; }
+  if (!KNOWN.has(cmd)) { ui.error(`Unknown command: ${cmd}`); ui.suggest("pebkac help"); return EXIT.USAGE; }
+  if (cmd === "help") return helpCommand();
+  if (cmd === "init") return initCommand();
+  if (cmd === "status") return statusCommand();
+  if (cmd === "doctor") return doctorCommand();
+  if (cmd === "off") return offCommand();
+  if (cmd === "on") return onCommand();
+  if (cmd === "launch") return launchCommand();
+  if (cmd === "version") { const p = packageInfo(); if (!quiet) ui.raw(`PEBKAC ${p.version} (${p.name})`); return EXIT.OK; }
+  if (cmd === "config") return configCommand();
+  if (cmd === "completion") return completionCommand();
+  let cwd;
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, `pebkac ${cmd} --cwd .`); }
+  if (cmd === "api-keys") return await runApiKeys(cwd, args, ui, { json });
+  if (cmd === "hooks") return runHooks(cwd, args, ui, { json });
+  if (cmd === "platforms") return runPlatforms(cwd, repoRoot, args, ui, { json });
+  if (cmd === "plugins") return runPlugins(cwd, args, ui, { json });
+  if (cmd === "flags") return runFlags(cwd, args, ui, { json });
+  if (cmd === "audit") return runAudit(cwd, args, ui, { json });
+  if (cmd === "mode") return runMode(cwd, args, ui, { json });
+  if (cmd === "skill") return runSkill(cwd, args, ui, { json });
+  return EXIT.USAGE;
 }
+
+main().then(code => process.exit(code)).catch(err => { console.error(`Error: ${err.message}`); process.exit(err.message.includes("requires a value") ? EXIT.USAGE : EXIT.ISSUE); });

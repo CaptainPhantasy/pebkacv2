@@ -7,3 +7,9 @@
 .harness/state/
 .harness/projects/
 .harness/proxies/
+
+.env
+node_modules/
+
+# Supercache governance symlink (points to external drive, NEVER COMMIT)
+.supercache
