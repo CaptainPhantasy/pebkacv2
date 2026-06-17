@@ -1266,10 +1266,13 @@ describe("Audit: --json always prints regardless of --quiet", () => {
 describe("Audit: init checks source extension exists", () => {
   test("init with missing source extension shows clear error", () => {
     // This test validates the guard exists; source is present in dev repo
-    // so we test the error path by checking the guard is in the code
+    // (and embedded for compiled binaries) so we test the error path by
+    // checking the guard is in the code.
     const cli = readFileSync(join(resolve(dirname(fileURLToPath(import.meta.url)), ".."), "bin", "pebkac.js"), "utf8");
     expect(cli).toMatch(/Extension source not found/);
-    expect(cli).toMatch(/existsSync\(srcExt\)/);
+    // Guard may be expressed as either existsSync(srcExt) (legacy) or
+    // !src.text (embedded-aware) — both are valid guards.
+    expect(cli).toMatch(/existsSync\(srcExt\)|!src\.text/);
   });
 });
 

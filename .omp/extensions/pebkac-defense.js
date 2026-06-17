@@ -1270,7 +1270,8 @@ function pebkacDefenseExtension(pi) {
   // Detects which compiled item the agent is currently working on by scanning
   // recent assistant messages for item-N markers, and exposes a live progress
   // view of the enforcer ledger keyed by compiled item.
-  let currentItemId = null;
+  // NOTE: currentItemId is declared at the top of this factory ( alongside
+  // compiledItemCount ) — do not redeclare it here.
   const ITEM_MARKER = /\bitem-(\d+)\b/i;
   function detectCurrentItem(messages) {
     if (compiledItemCount === 0) return null;

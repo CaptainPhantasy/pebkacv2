@@ -9,7 +9,11 @@ import { runApiKeys } from "../lib/api-keys.js";
 import { runHooks, getHooksStatus, installHooks } from "../lib/git-hooks.js";
 import { runPlatforms, installPlatforms, platformStatus } from "../lib/platforms.js";
 import { DEFAULT_FLAGS, runAudit, runFlags, runMode, runPlugins, runSkill, scanPlugins } from "../lib/ops.js";
+import { PACKAGE, VERSION, NAME, resolveExtensionSource } from "../lib/embedded.js";
 
+// repoRoot is retained for source-tree fallback resolution and parity with
+// prior behavior; commands that need the defense extension source prefer
+// the embedded copy (see lib/embedded.js) so compiled binaries work too.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const KNOWN = new Set(["help", "init", "status", "doctor", "off", "on", "launch", "version", "config", "completion", "api-keys", "hooks", "platforms", "plugins", "flags", "audit", "mode", "skill"]);
@@ -20,8 +24,11 @@ const verbose = hasFlag(args, "--verbose", "-V");
 const ui = makeUi({ quiet, json });
 
 function packageInfo() {
+  // PACKAGE is imported with { type: "json" } — available both at source
+  // (read from disk) and in compiled binaries (inlined by bun --compile).
+  if (PACKAGE && PACKAGE.version) return PACKAGE;
   try { return JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8")); }
-  catch { return { name: "PEBKAC", version: "unknown" }; }
+  catch { return { name: NAME, version: VERSION }; }
 }
 
 function failUsage(message, suggestion) {
@@ -60,9 +67,9 @@ function initCommand() {
     ui.suggest("pebkac init --non-interactive --yes --cwd .");
     return EXIT.USAGE;
   }
-  const srcExt = join(repoRoot, ".omp", "extensions", "pebkac-defense.js");
-  if (!existsSync(srcExt)) {
-    ui.error(`Extension source not found: ${srcExt}`);
+  const src = resolveExtensionSource(repoRoot);
+  if (!src.text) {
+    ui.error(`Extension source not found (looked in: ${src.path})`);
     ui.suggest("Re-clone the repository or restore .omp/extensions/pebkac-defense.js.");
     return EXIT.ISSUE;
   }
