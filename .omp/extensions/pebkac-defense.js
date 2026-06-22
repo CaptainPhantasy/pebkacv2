@@ -128,7 +128,6 @@ class CheckpointManager {
       await this.#pruneBackups();
     } catch (err) {
       console.error('[PEBKAC] Checkpoint save failed:', err.message, 'File:', this.#checkpointDir);
-      throw err;
     }
   }
   async#loadLatest() {
