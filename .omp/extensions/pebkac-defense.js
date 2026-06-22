@@ -1006,6 +1006,8 @@ var CONFIG = {
   TURN_BUDGET_WARNING: parseInt(process.env.PEBKAC_BUDGET_WARNING) || 20
 };
 
+var TOOL_CALL_LIMIT = CONFIG.RATE_LIMIT_TOOL_CALLS;
+var ESCALATION_THRESHOLD = CONFIG.ESCALATION_THRESHOLD;
 var toolCallsThisTurn = 0;
 /** Reset all module-level state — for test isolation only */
 function resetAllState() {
