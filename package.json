@@ -1,6 +1,6 @@
 {
   "name": "pebkac-defense",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "test": "bun test",
@@ -8,5 +8,29 @@
   },
   "bin": {
     "pebkac": "./bin/pebkac.js"
-  }
+  },
+  "author": "Floyd's Labs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CaptainPhantasy/pebkacv2.git"
+  },
+  "homepage": "https://floyd-labs-proving-ground.captainphantasy.chatgpt.site/open-source",
+  "bugs": {
+    "url": "https://github.com/CaptainPhantasy/pebkacv2/issues"
+  },
+  "description": "Project guardrails for coding agents: evidence checks, destructive-command guards, secret redaction, checkpoints, and a CLI to inspect the setup.",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    ".omp/extensions/",
+    "plugins/recommended/",
+    "README.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "assets/"
+  ],
+  "license": "UNLICENSED"
 }

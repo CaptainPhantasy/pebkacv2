@@ -7,7 +7,7 @@ import { installPlatforms, platformStatus } from "../lib/platforms.js";
 
 function tempRoot(prefix = "pebkac-hooks-") { return mkdtempSync(join(tmpdir(), prefix)); }
 function cleanup(dir) { if (dir?.startsWith(tmpdir())) rmSync(dir, { recursive: true, force: true }); }
-function git(args, cwd) { return Bun.spawnSync({ cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" }); }
+function git(args, cwd) { return Bun.spawnSync({ env: { ...process.env }, cmd: ["git", ...args], cwd, stdout: "pipe", stderr: "pipe" }); }
 
 describe("managed git hooks", () => {
   test("install is idempotent and preserves existing hooks as .local", () => {
@@ -45,8 +45,8 @@ describe("managed git hooks", () => {
 describe("platform installers", () => {
   test("installs omp extension, claude/pi context, and codex hooks", () => {
     const cwd = tempRoot();
-    const oldCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = join(cwd, "codex-home");
+    const oldCodexHome = process.env.PEBKAC_CODEX_HOME;
+    process.env.PEBKAC_CODEX_HOME = join(cwd, "codex-home");
     try {
       const results = installPlatforms(cwd, process.cwd(), "all");
       expect(results.every(r => r.ok)).toBe(true);
@@ -63,7 +63,7 @@ describe("platform installers", () => {
       expect(readFileSync(join(cwd, "codex-home", "pebkac", "hooks", "pebkac-defense-hook.js"), "utf8")).toContain("PEBKAC-MANAGED-CODEX-HOOK");
       const status = platformStatus(cwd, "all");
       expect(status.every(s => s.installed)).toBe(true);
-    } finally { if (oldCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodexHome; cleanup(cwd); }
+    } finally { if (oldCodexHome === undefined) delete process.env.PEBKAC_CODEX_HOME; else process.env.PEBKAC_CODEX_HOME = oldCodexHome; cleanup(cwd); }
   });
 
   test("managed context upsert preserves user text", () => {

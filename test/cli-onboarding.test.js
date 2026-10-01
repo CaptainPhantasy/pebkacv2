@@ -15,7 +15,7 @@ describe("CLI onboarding", () => {
   test("init --non-interactive writes launchable project state", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: [
           "bun",
           "./bin/pebkac.js",
@@ -57,7 +57,7 @@ describe("CLI onboarding", () => {
   test("init without non-interactive mode fails safely when no TTY is available", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe",

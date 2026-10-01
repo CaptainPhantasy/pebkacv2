@@ -1,85 +1,48 @@
 # PEBKAC
 
-PEBKAC is a release-focused defense harness for AI coding sessions.
+![PEBKAC — Floyd’s Labs](assets/hero.jpg)
 
-It wraps the active runtime, installs platform-specific defense surfaces, manages provider keys safely, protects git history, persists session state, and exposes an operational CLI for setup, diagnostics, flags, plugins, audit review, and mode switching.
+**Make the agent show its work.**
 
-## Unified CLI Surface
+Project guardrails for coding agents: evidence checks, destructive-command guards, secret redaction, checkpoints, and a CLI to inspect the setup. Built at Floyd’s Labs: one garage, two black cats, and tools that have to earn the desk space.
 
-```text
-Lifecycle:   init, launch, status, doctor, off, on, mode
-Security:    api-keys, hooks, platforms
-Operations:  config, flags, plugins, audit, completion, skill, version
+[Download v1.1.0](https://github.com/CaptainPhantasy/pebkacv2/releases/tag/v1.1.0) · [Report a bug](https://github.com/CaptainPhantasy/pebkacv2/issues) · [Floyd’s Labs](https://floyd-labs-proving-ground.captainphantasy.chatgpt.site/open-source)
+
+## Get it running
+
+Requirements: **Bun 1.3+ for source; standalone macOS Apple Silicon binary available**.
+
+On macOS with Apple Silicon, download and unpack the standalone package:
+
+```sh
+tar -xzf pebkac-1.1.0-macos-arm64.tar.gz
+./pebkac-1.1.0-macos-arm64/pebkac version
+./pebkac-1.1.0-macos-arm64/pebkac init --non-interactive --yes --cwd /path/to/project
+./pebkac-1.1.0-macos-arm64/pebkac doctor --cwd /path/to/project
 ```
 
-## Core Guarantees
+The binary includes Bun and the defense extension. It is unsigned; macOS may ask you to approve running a downloaded executable. Source users can unpack the source archive and run `bun bin/pebkac.js` with Bun 1.3+.
 
-- Evidence-first completion enforcement
-- Git guardrails and managed hooks
-- Secrets isolation with OS keychain storage
-- OMP extension plus Claude/Pi defense context installation
-- Project-local harness state under `.harness/`
-- First-run splash only; no repeat animation spam on routine commands
-- Machine-readable JSON output for status/doctor and command-specific JSON surfaces
+`init` installs project-scoped OMP, Claude, and Pi integration files and managed Git hooks when the folder is a Git repository. It preserves an existing Git hook as `.local`. User-wide Codex/ZCode integration is an explicit action: `pebkac platforms install codex` or `pebkac platforms install zcode`. Existing malformed Codex hook JSON is rejected rather than overwritten.
 
-## Quick Start
+The configured agent runtime defaults to `omp`; install that runtime or set `pebkac config set agent_runtime none --cwd /path/to/project` for standalone inspection. `launch --dry-run` previews a command without requiring the runtime. Guardrails reduce mistakes; they do not provide a security sandbox or prove that an agent's claims are true.
 
-```bash
-pebkac init --non-interactive --yes
-pebkac status
-pebkac doctor
-pebkac help api-keys
-```
+## What is in the box
 
-## Commands
+The release includes `pebkac-1.1.0-macos-arm64.tar.gz`, source where applicable, and `SHA256SUMS.txt`. Use the tagged release's named assets for installation; GitHub's automatic source archives are snapshots. Verify a download with `shasum -a 256 -c SHA256SUMS.txt` after downloading the matching files.
 
-### Lifecycle
+## Show the work
 
-- `pebkac init` — initialize `.harness`, install OMP/Claude/Pi surfaces, write defaults, install hooks when inside a git repo
-- `pebkac launch` — launch the configured runtime (`omp`, `claude`, `pi`, `none`)
-- `pebkac status` — concise health snapshot with runtime, platforms, hooks, plugins, checkpoints, audit size
-- `pebkac doctor` — deep diagnostic report with remediation
-- `pebkac off` / `pebkac on` — project disable sentinel management
-- `pebkac mode` — show or change runtime / verbosity / enabled state
+`bun test` runs isolated tests for guard behavior, redaction, CLI, platforms, checkpoints, and packaging resources. The standalone binary is separately run from a fresh directory. Agent integration tests use a simulated host; they do not certify every external agent version.
 
-### Security
+## Contribute or get help
 
-- `pebkac api-keys` — list/add/rotate/remove/test provider keys via OS keychain or explicit file backend for tests
-- `pebkac hooks` — install/status-check managed pre-commit, pre-push, pre-rebase, commit-msg hooks
-- `pebkac platforms` — install/status-check OMP extension and Claude/Pi managed `CLAUDE.md` context
+Open an issue with your platform, version, command, and a minimal reproduction. Keep credentials and personal transcripts out of reports. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
-### Operations
+## License
 
-- `pebkac config` — get/set/list `.harness/config.yaml`
-- `pebkac flags` — persistent feature flag store in `.harness/state/feature-flags.json`
-- `pebkac plugins` — install, discover, recommend, and execute global or project plugins
-- `pebkac audit` — summarize/tail redacted JSONL audit events
-- `pebkac completion` — emit bash/zsh/fish completion scripts
-- `pebkac skill` — expose the CLI-X 2026 UI/UX contract used by this CLI
-- `pebkac version` — print product and package version
+The repository has no open-source license granting redistribution rights. Existing restrictions are preserved; a public download does not change those rights.
 
-## Harness State
+---
 
-```text
-.harness/
-  config.yaml
-  audit.log
-  checkpoints/
-  state/
-    onboarding-preferences.json
-    telemetry-consent.json
-    feature-flags.json
-    splash-seen
-  vault/
-    config.yaml
-.omp/extensions/pebkac-defense.js
-.claude/CLAUDE.md
-.pi/CLAUDE.md
-```
-
-## Verification
-
-- `bun test`
-- `pebkac help`
-- `pebkac status --json --cwd <path>`
-- `pebkac doctor --json --cwd <path>`
+Built with intent. Bella checks the keyboard. Bowser watches the router.

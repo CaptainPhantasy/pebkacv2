@@ -335,7 +335,7 @@ describe("CLI off/on commands", () => {
     const cwd = tempRoot();
     try {
       mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "off", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -352,7 +352,7 @@ describe("CLI off/on commands", () => {
     try {
       mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
       writeFileSync(join(cwd, ".harness", "state", "disabled"), "test\n");
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "on", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -368,7 +368,7 @@ describe("CLI off/on commands", () => {
     const cwd = tempRoot();
     try {
       mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "on", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -386,7 +386,7 @@ describe("CLI launch and doctor commands", () => {
     try {
       mkdirSync(join(cwd, ".harness"), { recursive: true });
       writeFileSync(join(cwd, ".harness", "config.yaml"), `version: "1.0"\ndefaults:\n  enabled: true\nagent_runtime: "omp"\n`);
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "launch", "--dry-run", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -408,7 +408,7 @@ describe("CLI launch and doctor commands", () => {
       mkdirSync(join(cwd, ".harness", "checkpoints"), { recursive: true });
       mkdirSync(join(cwd, ".harness", "vault"), { recursive: true });
       writeFileSync(join(cwd, ".harness", "config.yaml"), `version: "1.0"\ndefaults:\n`);
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "doctor", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -427,14 +427,14 @@ describe("CLI status command", () => {
     const cwd = tempRoot();
     try {
       // Full init to get extension file
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
       });
       expect(result.exitCode).toBe(0);
 
-      const statusResult = Bun.spawnSync({
+      const statusResult = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "status", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -451,7 +451,7 @@ describe("CLI status command", () => {
 
 describe("CLI colorized output", () => {
   test("version command prints version", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "version"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -463,7 +463,7 @@ describe("CLI colorized output", () => {
   });
 
   test("--version flag also works", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "--version"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -476,7 +476,7 @@ describe("CLI colorized output", () => {
   test("init output shows next steps", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -494,7 +494,7 @@ describe("CLI colorized output", () => {
   test("doctor output uses PASS/FAIL markers", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "doctor", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -512,7 +512,7 @@ describe("CLI colorized output", () => {
     const cwd = tempRoot();
     try {
       mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "off", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -584,13 +584,13 @@ describe("JSON output mode", () => {
   test("status --json outputs valid JSON with expected keys", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
       });
       expect(result.exitCode).toBe(0);
-      const jsonResult = Bun.spawnSync({
+      const jsonResult = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "status", "--json", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -613,13 +613,13 @@ describe("JSON output mode", () => {
   test("doctor --json outputs valid JSON with checks", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
       });
       expect(result.exitCode).toBe(0);
-      const jsonResult = Bun.spawnSync({
+      const jsonResult = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "doctor", "--json", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -643,7 +643,7 @@ describe("JSON output mode", () => {
   test("doctor --json reports failures correctly", () => {
     const cwd = tempRoot();
     try {
-      const jsonResult = Bun.spawnSync({
+      const jsonResult = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "doctor", "--json", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -662,7 +662,7 @@ describe("JSON output mode", () => {
 
 describe("Quiet mode (--quiet / -q)", () => {
   test("version --quiet produces no stdout", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "version", "--quiet"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -673,7 +673,7 @@ describe("Quiet mode (--quiet / -q)", () => {
   });
 
   test("version -q produces no stdout", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "-q", "version"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -687,7 +687,7 @@ describe("Quiet mode (--quiet / -q)", () => {
     const cwd = tempRoot();
     try {
       // Uninitialized project → issues → exit 1
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "status", "--quiet", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -703,7 +703,7 @@ describe("Quiet mode (--quiet / -q)", () => {
   test("doctor --quiet produces no stdout but exit code reflects health", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "doctor", "--quiet", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -719,7 +719,7 @@ describe("Quiet mode (--quiet / -q)", () => {
   test("init --quiet still creates files", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--quiet", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -739,7 +739,7 @@ describe("Quiet mode (--quiet / -q)", () => {
     const cwd = tempRoot();
     try {
       mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "off", "--quiet", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -756,7 +756,7 @@ describe("Quiet mode (--quiet / -q)", () => {
   test("status --json --quiet still produces JSON (machine output always prints)", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({
+      const result = Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "status", "--json", "--quiet", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -799,7 +799,7 @@ describe("Table-formatted output", () => {
   test("status output has aligned label columns", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({
+      Bun.spawnSync({ env: { ...process.env },
         cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd],
         cwd: process.cwd(),
         stdout: "pipe", stderr: "pipe",
@@ -826,8 +826,8 @@ describe("Config get/set/list", () => {
   test("config get reads top-level key", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(stdout).value).toBe("omp");
@@ -837,8 +837,8 @@ describe("Config get/set/list", () => {
   test("config get reads nested key", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "defaults.evidence_required", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "defaults.evidence_required", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
       expect(JSON.parse(stdout).value).toBe("true");
@@ -848,10 +848,10 @@ describe("Config get/set/list", () => {
   test("config set updates value and get reads it back", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const setResult = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "set", "agent_runtime", "claude", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const setResult = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "set", "agent_runtime", "claude", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       expect(setResult.exitCode).toBe(0);
-      const getResult = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const getResult = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--json", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(getResult.stdout);
       expect(getResult.exitCode).toBe(0);
       expect(JSON.parse(stdout).value).toBe("claude");
@@ -861,8 +861,8 @@ describe("Config get/set/list", () => {
   test("config get unknown key exits 1", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "nonexistent_key", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "nonexistent_key", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       expect(result.exitCode).toBe(1);
     } finally { cleanup(cwd); }
   });
@@ -870,7 +870,7 @@ describe("Config get/set/list", () => {
   test("config list outputs dashboard summary", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "list", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
@@ -883,7 +883,7 @@ describe("Config get/set/list", () => {
   test("config without init exits 1 with suggestion", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       expect(result.exitCode).toBe(1);
       const stderr = new TextDecoder().decode(result.stderr);
       expect(stderr).toContain("pebkac init");
@@ -893,7 +893,7 @@ describe("Config get/set/list", () => {
 
 describe("Shell completion", () => {
   test("completion bash outputs valid bash completion", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion", "bash"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion", "bash"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
     expect(stdout).toContain("complete -F _pebkac_completions pebkac");
@@ -902,7 +902,7 @@ describe("Shell completion", () => {
   });
 
   test("completion zsh outputs valid zsh completion", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion", "zsh"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion", "zsh"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
     expect(stdout).toContain("#compdef pebkac");
@@ -911,7 +911,7 @@ describe("Shell completion", () => {
   });
 
   test("completion fish outputs valid fish completion", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion", "fish"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion", "fish"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
     expect(stdout).toContain("complete -c pebkac");
@@ -920,21 +920,21 @@ describe("Shell completion", () => {
   });
 
   test("completion invalid shell exits 2 with usage", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion", "powershell"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion", "powershell"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     expect(result.exitCode).toBe(2);
     const stderr = new TextDecoder().decode(result.stderr);
     expect(stderr).toContain("bash|zsh|fish");
   });
 
   test("completion with no shell exits 2", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     expect(result.exitCode).toBe(2);
   });
 });
 
 describe("Error suggestions", () => {
   test("init without TTY shows suggestion", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "init"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -949,8 +949,8 @@ describe("Error suggestions", () => {
   test("config get missing key shows suggestion", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "nonexistent", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "nonexistent", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stderr = new TextDecoder().decode(result.stderr);
       expect(result.exitCode).toBe(1);
       expect(stderr).toContain("Suggestion");
@@ -961,7 +961,7 @@ describe("Error suggestions", () => {
   test("config no init shows suggestion to run init", () => {
     const cwd = tempRoot();
     try {
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "config", "get", "agent_runtime", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stderr = new TextDecoder().decode(result.stderr);
       expect(result.exitCode).toBe(1);
       expect(stderr).toContain("pebkac init");
@@ -969,7 +969,7 @@ describe("Error suggestions", () => {
   });
 
   test("completion invalid shell shows usage suggestion", () => {
-    const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "completion", "powershell"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+    const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "completion", "powershell"], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
     const stderr = new TextDecoder().decode(result.stderr);
     expect(result.exitCode).toBe(2);
     expect(stderr).toContain("bash|zsh|fish");
@@ -981,7 +981,7 @@ describe("Verbose mode (--verbose / -V)", () => {
   test("status --verbose shows verbose diagnostics section", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "status", "--verbose", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
@@ -995,7 +995,7 @@ describe("Verbose mode (--verbose / -V)", () => {
   test("doctor --verbose shows verbose diagnostics section", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "doctor", "--verbose", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
@@ -1008,7 +1008,7 @@ describe("Verbose mode (--verbose / -V)", () => {
   test("status -V (short flag) works", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "status", "-V", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, NO_COLOR: "1" } });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
@@ -1019,8 +1019,8 @@ describe("Verbose mode (--verbose / -V)", () => {
   test("--verbose --quiet suppresses verbose output (quiet wins)", () => {
     const cwd = tempRoot();
     try {
-      Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
-      const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", "status", "--verbose", "--quiet", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "init", "--non-interactive", "--yes", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
+      const result = Bun.spawnSync({ env: { ...process.env }, cmd: ["bun", "./bin/pebkac.js", "status", "--verbose", "--quiet", "--cwd", cwd], cwd: process.cwd(), stdout: "pipe", stderr: "pipe" });
       const stdout = new TextDecoder().decode(result.stdout);
       expect(result.exitCode).toBe(0);
       expect(stdout.trim()).toBe("");
@@ -1630,7 +1630,7 @@ describe("Correctness: SECRET_PATTERNS no shared /g state", () => {
 
 describe("CLI: per-command help", () => {
   test("help status shows status-specific usage", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "help", "status"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -1642,7 +1642,7 @@ describe("CLI: per-command help", () => {
   });
 
   test("help init shows init-specific usage", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "help", "init"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -1654,7 +1654,7 @@ describe("CLI: per-command help", () => {
   });
 
   test("help with unknown command exits 1", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "help", "nonexistent"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",
@@ -1665,7 +1665,7 @@ describe("CLI: per-command help", () => {
   });
 
   test("help without command shows general usage", () => {
-    const result = Bun.spawnSync({
+    const result = Bun.spawnSync({ env: { ...process.env },
       cmd: ["bun", "./bin/pebkac.js", "help"],
       cwd: process.cwd(),
       stdout: "pipe", stderr: "pipe",

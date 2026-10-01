@@ -1,0 +1,11 @@
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
+const sandbox = mkdtempSync(join(tmpdir(), "pebkac-test-home-"));
+process.env.PEBKAC_USER_HOME = sandbox;
+process.env.PEBKAC_CODEX_HOME = join(sandbox, ".codex");
+process.env.PEBKAC_KEYCHAIN_REGISTRY = join(sandbox, "keychain.json");
+const bin = join(sandbox, "bin"); mkdirSync(bin);
+writeFileSync(join(bin, "omp"), "#!/bin/sh\nexit 0\n"); chmodSync(join(bin, "omp"), 0o755);
+process.env.PATH = `${bin}:${process.env.PATH}`;
+process.on("exit", () => rmSync(sandbox, { recursive: true, force: true }));

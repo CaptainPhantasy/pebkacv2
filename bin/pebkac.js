@@ -82,14 +82,14 @@ function initCommand() {
   const telemetry = boolFromFlags(args, "--telemetry", "--no-telemetry", true);
   const notifications = boolFromFlags(args, "--notifications", "--no-notifications", true);
   const healthChecks = boolFromFlags(args, "--health-checks", "--no-health-checks", true);
-  const config = `# PEBKAC Harness Configuration\nversion: "1.0"\n\ndefaults:\n  evidence_required: true\n  deterministic_prompting: true\n  secrets_isolation: true\n  git_guard: true\n  checkpoint_interval: 10\n  turn_budget: 100\n  escalation_threshold: 5\n  verbosity: "${verbosity}"\n  enabled: ${enabled}\n\nagent_runtime: "omp"\nplatforms: all\n`;
+  const config = `# PEBKAC Harness Configuration\nversion: "1.0"\n\ndefaults:\n  evidence_required: true\n  deterministic_prompting: true\n  secrets_isolation: true\n  git_guard: true\n  checkpoint_interval: 10\n  turn_budget: 100\n  escalation_threshold: 5\n  verbosity: "${verbosity}"\n  enabled: ${enabled}\n\nagent_runtime: "omp"\nplatforms: project\n`;
   writeFileSync(harnessPaths(cwd).config, config);
   writeFileSync(join(harnessPaths(cwd).vault, "config.yaml"), `# PEBKAC Vault Configuration\nsecrets: {}\n`);
   writeJson(harnessPaths(cwd).prefs, { theme: verbosity === "quiet" ? "minimal" : "standard", verbosity, telemetry, notifications, healthChecks, capturedAt: new Date().toISOString() });
   writeJson(harnessPaths(cwd).telemetry, { enabled: telemetry });
   writeJson(harnessPaths(cwd).flags, DEFAULT_FLAGS);
   writeFileSync(join(harnessPaths(cwd).root, ".unboxed"), "true\n");
-  const platformResults = installPlatforms(cwd, repoRoot, "all");
+  const platformResults = installPlatforms(cwd, repoRoot, "project");
   const hookResult = installHooks(cwd);
   const splash = maybeSplash(cwd, { force: true, quiet });
   if (splash) ui.log(splash);
@@ -136,7 +136,7 @@ function statusData(cwd) {
   const configText = readConfigText(cwd);
   const configuredRuntime = readAgentRuntime(cwd);
   const runtime = detectRuntime(configuredRuntime);
-  const platforms = platformStatus(cwd, "all");
+  const platforms = platformStatus(cwd, yamlGet(readConfigText(cwd), "platforms") ?? "project");
   const hooks = getHooksStatus(cwd);
   const plugins = scanPlugins(cwd);
   const extensionPath = join(cwd, ".omp", "extensions", "pebkac-defense.js");
@@ -306,7 +306,7 @@ function launchCommand() {
       ui.log(`Command: open "${url}"`);
       ui.log(`Runtime: ${runtime.found ? runtime.path : "NOT FOUND"}`);
       ui.log("Remove --dry-run to execute.");
-      return runtime.found ? EXIT.OK : EXIT.ISSUE;
+      return EXIT.OK;
     }
     if (!runtime.found) { ui.error("ZCode.app not found at /Applications/ZCode.app"); ui.suggest("Install from https://zcode.z.ai/en/docs/install or run `pebkac doctor`."); return EXIT.ISSUE; }
     const deepLink = `zcode://workspace/open?path=${encodeURIComponent(cwd)}`;
@@ -318,7 +318,7 @@ function launchCommand() {
     ui.log(`Command: ${cmd} --cwd ${cwd} --dry-run`);
     ui.log(`Runtime: ${runtime.found ? runtime.path : "NOT FOUND"}`);
     ui.log("Remove --dry-run to execute.");
-    return runtime.found ? EXIT.OK : EXIT.ISSUE;
+    return EXIT.OK;
   }
   if (!runtime.found) { ui.error(`Runtime ${cmd} not found on PATH`); ui.suggest("Run `pebkac doctor` for diagnostics."); return EXIT.ISSUE; }
   const r = spawnSync(cmd, ["--cwd", cwd], { stdio: "inherit", cwd });
