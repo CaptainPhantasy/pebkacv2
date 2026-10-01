@@ -52,7 +52,7 @@ pebkac help api-keys
 
 - `pebkac config` — get/set/list `.harness/config.yaml`
 - `pebkac flags` — persistent feature flag store in `.harness/state/feature-flags.json`
-- `pebkac plugins` — scan local plugin manifests and recommend missing high-value plugins
+- `pebkac plugins` — install, discover, recommend, and execute global or project plugins
 - `pebkac audit` — summarize/tail redacted JSONL audit events
 - `pebkac completion` — emit bash/zsh/fish completion scripts
 - `pebkac skill` — expose the CLI-X 2026 UI/UX contract used by this CLI

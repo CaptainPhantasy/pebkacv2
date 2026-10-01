@@ -1,0 +1,7 @@
+{
+  "name": "doctor-autofix",
+  "version": "1.0.0",
+  "description": "Apply safe PEBKAC doctor remediations and verify the repaired project.",
+  "entry": "index.js",
+  "category": "automation"
+}

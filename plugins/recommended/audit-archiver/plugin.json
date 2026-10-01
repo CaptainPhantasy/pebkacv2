@@ -1,0 +1,8 @@
+{
+  "name": "audit-archiver",
+  "version": "1.0.0",
+  "description": "Create a redacted, compressed, checksummed off-project copy of the PEBKAC audit log.",
+  "entry": "index.js",
+  "category": "observability",
+  "configuration": {}
+}

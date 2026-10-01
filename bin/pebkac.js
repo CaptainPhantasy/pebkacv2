@@ -8,7 +8,7 @@ import { makeUi, groupedHelp, commandHelp, row, maybeSplash } from "../lib/ui.js
 import { runApiKeys } from "../lib/api-keys.js";
 import { runHooks, getHooksStatus, installHooks } from "../lib/git-hooks.js";
 import { runPlatforms, installPlatforms, platformStatus } from "../lib/platforms.js";
-import { DEFAULT_FLAGS, runAudit, runFlags, runMode, runPlugins, runSkill, scanPlugins } from "../lib/ops.js";
+import { DEFAULT_FLAGS, auditEvent, runAudit, runFlags, runMode, runPlugins, runSkill, scanPlugins } from "../lib/ops.js";
 import { PACKAGE, VERSION, NAME, resolveExtensionSource } from "../lib/embedded.js";
 
 // repoRoot is retained for source-tree fallback resolution and parity with
@@ -17,7 +17,7 @@ import { PACKAGE, VERSION, NAME, resolveExtensionSource } from "../lib/embedded.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
 const KNOWN = new Set(["help", "init", "status", "doctor", "off", "on", "launch", "version", "config", "completion", "api-keys", "hooks", "platforms", "plugins", "flags", "audit", "mode", "skill"]);
-const KNOWN_FLAGS = new Set(["--help", "-h", "--version", "-v", "--quiet", "-q", "--json", "--cwd", "--verbose", "-V", "--dry-run", "--non-interactive", "--yes", "--theme", "--verbosity", "--enabled", "--no-enabled", "--telemetry", "--no-telemetry", "--notifications", "--no-notifications", "--health-checks", "--no-health-checks", "--key-from-env", "--limit"]);
+const KNOWN_FLAGS = new Set(["--help", "-h", "--version", "-v", "--quiet", "-q", "--json", "--cwd", "--verbose", "-V", "--dry-run", "--non-interactive", "--yes", "--theme", "--verbosity", "--enabled", "--no-enabled", "--telemetry", "--no-telemetry", "--notifications", "--no-notifications", "--health-checks", "--no-health-checks", "--key-from-env", "--limit", "--archive-dir"]);
 const quiet = hasFlag(args, "--quiet", "-q");
 const json = hasFlag(args, "--json");
 const verbose = hasFlag(args, "--verbose", "-V");
@@ -267,10 +267,52 @@ function doctorCommand() {
 
 function launchCommand() {
   let cwd;
-  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac launch --cwd ."); }
-  const runtimeName = readAgentRuntime(cwd);
+  try { cwd = resolveCwd(args); } catch (err) { return failUsage(err.message, "pebkac launch [runtime] --cwd ."); }
+  // Positional runtime override: `pebkac launch zcode` overrides the
+  // configured agent_runtime for this invocation only (config is not
+  // mutated). Strips flags and --cwd's value, leaving the first bare token.
+  const KNOWN_RUNTIMES = ["omp", "claude", "pi", "codex", "zcode", "none"];
+  const positional = args.slice(args.indexOf("launch") + 1).filter((a, i, arr) => {
+    if (a === "--cwd") return false;          // drop the flag
+    if (i > 0 && arr[i - 1] === "--cwd") return false;  // drop its value
+    if (a.startsWith("--")) return false;     // drop other flags (--dry-run)
+    return true;
+  });
+  const override = positional[0];
+  let runtimeName;
+  if (override && KNOWN_RUNTIMES.includes(override)) {
+    runtimeName = override;
+  } else if (override) {
+    ui.error(`Unknown runtime '${override}'. Must be one of: ${KNOWN_RUNTIMES.join(", ")}`);
+    return EXIT.USAGE;
+  } else {
+    runtimeName = readAgentRuntime(cwd);
+  }
   if (runtimeName === "none") { ui.log(`${ui.icon("info")} Standalone mode (agent_runtime: none). No harness to launch.`); return EXIT.OK; }
   const runtime = detectRuntime(runtimeName);
+  // ZCode is a macOS Electron GUI app, not a CLI TTY binary. Launch via
+  // `open -a ZCode.app` (returns immediately; ZCode restores its last
+  // workspace via its built-in session-restore plugin). This diverges from
+  // the omp/claude/pi path which spawnSync a CLI binary with stdio inherit.
+  if (runtimeName === "zcode") {
+    // ZCode is a macOS Electron GUI app. Workspace opening goes through its
+    // registered `zcode://` deep-link scheme (the same path the Finder
+    // "Open in ZCode" extension uses): the handler in app.asar parses the
+    // URL, extracts the `path` query param, and dispatches to
+    // handleOpenWorkspacePath. `open -a ZCode.app` alone only raises the
+    // window without loading a workspace.
+    if (hasFlag(args, "--dry-run")) {
+      const url = `zcode://workspace/open?path=${encodeURIComponent(cwd)}`;
+      ui.log(`Command: open "${url}"`);
+      ui.log(`Runtime: ${runtime.found ? runtime.path : "NOT FOUND"}`);
+      ui.log("Remove --dry-run to execute.");
+      return runtime.found ? EXIT.OK : EXIT.ISSUE;
+    }
+    if (!runtime.found) { ui.error("ZCode.app not found at /Applications/ZCode.app"); ui.suggest("Install from https://zcode.z.ai/en/docs/install or run `pebkac doctor`."); return EXIT.ISSUE; }
+    const deepLink = `zcode://workspace/open?path=${encodeURIComponent(cwd)}`;
+    const r = spawnSync("open", [deepLink], { stdio: "inherit" });
+    return r.status ?? EXIT.OK;
+  }
   const cmd = runtime.name;
   if (hasFlag(args, "--dry-run")) {
     ui.log(`Command: ${cmd} --cwd ${cwd} --dry-run`);
@@ -379,4 +421,11 @@ async function main() {
   return EXIT.USAGE;
 }
 
-main().then(code => process.exit(code)).catch(err => { console.error(`Error: ${err.message}`); process.exit(err.message.includes("requires a value") ? EXIT.USAGE : EXIT.ISSUE); });
+const commandStartedAt = Date.now();
+main().then(code => {
+  try {
+    const auditCwd = resolveCwd(args);
+    if (existsSync(harnessPaths(auditCwd).root)) auditEvent(auditCwd, "cli_command", { command: command(), exitCode: code, durationMs: Date.now() - commandStartedAt });
+  } catch {}
+  process.exit(code);
+}).catch(err => { console.error(`Error: ${err.message}`); process.exit(err.message.includes("requires a value") ? EXIT.USAGE : EXIT.ISSUE); });

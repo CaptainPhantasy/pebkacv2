@@ -43,17 +43,27 @@ describe("managed git hooks", () => {
 });
 
 describe("platform installers", () => {
-  test("installs omp extension and claude/pi context", () => {
+  test("installs omp extension, claude/pi context, and codex hooks", () => {
     const cwd = tempRoot();
+    const oldCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = join(cwd, "codex-home");
     try {
       const results = installPlatforms(cwd, process.cwd(), "all");
       expect(results.every(r => r.ok)).toBe(true);
       expect(existsSync(join(cwd, ".omp", "extensions", "pebkac-defense.js"))).toBe(true);
       expect(readFileSync(join(cwd, ".claude", "CLAUDE.md"), "utf8")).toContain("PEBKAC-MANAGED-CONTEXT");
       expect(readFileSync(join(cwd, ".pi", "CLAUDE.md"), "utf8")).toContain("PEBKAC-MANAGED-CONTEXT");
+      const codexManifest = JSON.parse(readFileSync(join(cwd, "codex-home", "hooks.json"), "utf8"));
+      expect(codexManifest.hooks.SessionStart[0].hooks[0].command).toContain("pebkac-defense-hook.js");
+      expect(codexManifest.hooks.SessionStart[0].hooks[0].command).toContain("SessionStart");
+      expect(codexManifest.hooks.PreToolUse[0].hooks[0].command).toContain("PreToolUse");
+      expect(codexManifest.hooks.PostToolUse[0].hooks[0].command).toContain("PostToolUse");
+      expect(codexManifest.hooks.UserPromptSubmit[0].hooks[0].command).toContain("UserPromptSubmit");
+      expect(codexManifest.hooks.Stop[0].hooks[0].command).toContain("Stop");
+      expect(readFileSync(join(cwd, "codex-home", "pebkac", "hooks", "pebkac-defense-hook.js"), "utf8")).toContain("PEBKAC-MANAGED-CODEX-HOOK");
       const status = platformStatus(cwd, "all");
       expect(status.every(s => s.installed)).toBe(true);
-    } finally { cleanup(cwd); }
+    } finally { if (oldCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodexHome; cleanup(cwd); }
   });
 
   test("managed context upsert preserves user text", () => {

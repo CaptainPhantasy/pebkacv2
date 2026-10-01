@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
 import { tmpdir } from "os";
 import pebkacDefenseExtension, { resetAllState } from "../.omp/extensions/pebkac-defense.js";
+import pkg from "../package.json" with { type: "json" };
 
 function tempRoot() {
   return join(tmpdir(), `pebkac-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -458,7 +459,7 @@ describe("CLI colorized output", () => {
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
     expect(stdout).toContain("PEBKAC");
-    expect(stdout).toContain("1.0.0");
+    expect(stdout).toContain(pkg.version);
   });
 
   test("--version flag also works", () => {
@@ -469,7 +470,7 @@ describe("CLI colorized output", () => {
     });
     const stdout = new TextDecoder().decode(result.stdout);
     expect(result.exitCode).toBe(0);
-    expect(stdout).toContain("1.0.0");
+    expect(stdout).toContain(pkg.version);
   });
 
   test("init output shows next steps", () => {

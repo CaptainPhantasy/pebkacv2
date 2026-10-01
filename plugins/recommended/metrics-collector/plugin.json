@@ -1,0 +1,7 @@
+{
+  "name": "metrics-collector",
+  "version": "1.0.0",
+  "description": "Measure PEBKAC block rate, evidence ratio, and recorded command latency.",
+  "entry": "index.js",
+  "category": "analytics"
+}

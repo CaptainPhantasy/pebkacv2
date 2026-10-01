@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { gunzipSync } from "zlib";
 
 function tempRoot(prefix = "pebkac-unified-") {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -9,8 +10,9 @@ function tempRoot(prefix = "pebkac-unified-") {
 function cleanup(dir) {
   if (dir?.startsWith(tmpdir())) rmSync(dir, { recursive: true, force: true });
 }
+const TEST_EMPTY_GLOBAL_ROOT = join(tmpdir(), `pebkac-empty-global-${process.pid}-${Date.now()}`);
 function run(args, opts = {}) {
-  const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", ...args], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, ...opts.env } });
+  const result = Bun.spawnSync({ cmd: ["bun", "./bin/pebkac.js", ...args], cwd: process.cwd(), stdout: "pipe", stderr: "pipe", env: { ...process.env, PEBKAC_GLOBAL_PLUGIN_ROOT: TEST_EMPTY_GLOBAL_ROOT, ...opts.env } });
   return { code: result.exitCode, stdout: new TextDecoder().decode(result.stdout), stderr: new TextDecoder().decode(result.stderr) };
 }
 
@@ -185,7 +187,7 @@ describe("init, status, doctor, modes, flags", () => {
       expect(r.code).toBe(0);
       expect(r.stdout).toContain("Plugins");
       expect(r.stdout).toContain("Verdict:");
-      expect(r.stdout).toContain("NO LOCAL PLUGINS");
+      expect(r.stdout).toContain("NO PLUGINS");
       expect(r.stdout).toContain("Next actions:");
       expect(r.stdout).toContain("pebkac plugins recommend");
     } finally { cleanup(cwd); }
@@ -214,6 +216,52 @@ describe("init, status, doctor, modes, flags", () => {
       expect(data.recommendations[0]).toHaveProperty("rationale");
       expect(data.recommendations[0]).toHaveProperty("category");
     } finally { cleanup(cwd); }
+  });
+
+  test("recommended plugins install globally, disappear from recommendations, and execute", () => {
+    const cwd = tempRoot();
+    const globalRoot = tempRoot("pebkac-global-plugins-");
+    const archiveRoot = tempRoot("pebkac-audit-archive-");
+    const env = { PEBKAC_GLOBAL_PLUGIN_ROOT: globalRoot };
+    try {
+      mkdirSync(join(cwd, ".harness", "state"), { recursive: true });
+      const audit = [
+        { timestamp: Date.now(), event: "turn_end", details: { metrics: { failedToolCalls: 1, evidenceCount: 0 } } },
+        { timestamp: Date.now(), event: "turn_end", details: { metrics: { failedToolCalls: 0, evidenceCount: 2 } } },
+        { timestamp: Date.now(), event: "cli_command", details: { command: "status", exitCode: 0, durationMs: 25, token: "sk-ant-secretsecretsecretsecret" } },
+      ];
+      writeFileSync(join(cwd, ".harness", "audit.log"), `${audit.map(item => JSON.stringify(item)).join("\n")}\n`);
+
+      const install = run(["plugins", "install-recommended", "--archive-dir", archiveRoot, "--json", "--cwd", cwd], { env });
+      expect(install.code, install.stderr).toBe(0);
+      expect(JSON.parse(install.stdout).verified).toHaveLength(3);
+
+      const recommend = run(["plugins", "recommend", "--json", "--cwd", cwd], { env });
+      expect(recommend.code, recommend.stderr).toBe(0);
+      expect(JSON.parse(recommend.stdout).recommendations).toHaveLength(0);
+
+      const metrics = run(["plugins", "run", "metrics-collector", "--json", "--cwd", cwd], { env });
+      expect(metrics.code, metrics.stderr).toBe(0);
+      const metricData = JSON.parse(metrics.stdout).data;
+      expect(metricData.blockRatePercent).toBe(50);
+      expect(metricData.evidenceRatioPercent).toBe(50);
+      expect(metricData.commandLatencyMs.samples).toBeGreaterThanOrEqual(1);
+      expect(existsSync(join(cwd, ".harness", "state", "pebkac-metrics.json"))).toBe(true);
+
+      const archive = run(["plugins", "run", "audit-archiver", "--json", "--cwd", cwd], { env });
+      expect(archive.code, archive.stderr).toBe(0);
+      const archiveData = JSON.parse(archive.stdout).data;
+      expect(archiveData.verified).toBe(true);
+      expect(existsSync(archiveData.archive)).toBe(true);
+      expect(existsSync(`${archiveData.archive}.json`)).toBe(true);
+      const archivedText = gunzipSync(readFileSync(archiveData.archive)).toString("utf8");
+      expect(archivedText).toContain("[REDACTED_ANTHROPIC_KEY]");
+      expect(archivedText).not.toContain("sk-ant-secretsecretsecretsecret");
+    } finally {
+      cleanup(cwd);
+      cleanup(globalRoot);
+      cleanup(archiveRoot);
+    }
   });
 
   test("doctor text includes verdict summary", () => {
